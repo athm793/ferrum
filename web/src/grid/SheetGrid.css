@@ -395,6 +395,9 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
 .cc-tr__check::before,
 .cc-th__check::before { content: ""; position: absolute; inset: -9px; }
 
+/* In select mode every box is shown outright; the hover reveal stays as a secondary path. */
+.cc-grid--selectmode .cc-tr__check,
+.cc-grid--selectmode .cc-th__check,
 .cc-grid__gutter:hover .cc-tr__check,
 .cc-grid--rowselect .cc-tr__check,
 .cc-tr--sel .cc-tr__check,
@@ -403,6 +406,7 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
 .cc-th--sel .cc-th__check { opacity: 1; }
 
 /* the number steps aside when its checkbox is showing */
+.cc-grid--selectmode .cc-tr__num,
 .cc-grid__gutter:hover .cc-tr__num,
 .cc-grid--rowselect .cc-tr__num,
 .cc-tr--sel .cc-tr__num { opacity: 0; }
@@ -431,6 +435,7 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
   transition: opacity 90ms ease, background 90ms ease, border-color 90ms ease;
 }
 .cc-corner__check::before { content: ""; position: absolute; inset: -9px; }
+.cc-grid--selectmode .cc-corner__check,
 .cc-grid__header:hover .cc-corner__check,
 .cc-grid--rowselect .cc-corner__check,
 .cc-corner__check--some,

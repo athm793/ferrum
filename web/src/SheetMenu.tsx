@@ -63,9 +63,17 @@ interface Props {
   onRestorePoints?: () => void;
   /** Open the workspace-wide settings, so the levels read as a hierarchy rather than three places. */
   onWorkspaceSettings?: () => void;
+  /**
+   * Whether the grid's selection checkboxes are showing, and the switch for it.
+   *
+   * The row, column and select-all boxes are hidden until this is on — a hover-only control is one
+   * nobody finds, which is exactly what happened. Turning it on from here is the discoverable way in.
+   */
+  selectMode?: boolean;
+  onToggleSelectMode?: () => void;
 }
 
-export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBudgetSet, onSheetChanged, onDedupe, onUsage, onSchedules, onRestorePoints, onLimits, onWorkspaceSettings }: Props) {
+export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBudgetSet, onSheetChanged, onDedupe, onUsage, onSchedules, onRestorePoints, onLimits, onWorkspaceSettings, selectMode, onToggleSelectMode }: Props) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState<DOMRect | null>(null);
@@ -184,6 +192,13 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
           <button className="cc-menu2__item" onClick={() => { setOpen(false); setName(sheet.name); setRenaming(true); }}>
             Rename this table
           </button>
+          {/* Turns the row / column / select-all checkboxes on. They are deliberately hidden until
+              this is switched on, so this menu item is how anyone discovers they exist at all. */}
+          {onToggleSelectMode && (
+            <button className="cc-menu2__item" onClick={() => { setOpen(false); onToggleSelectMode(); }}>
+              {selectMode ? "Done selecting — hide the checkboxes" : "Select rows & columns"}
+            </button>
+          )}
           {/* `viewQuery` is the grid's own serialiser, reused rather than rebuilt — the export and
               the grid have to name the same rows, and two builders of the same query string is
               exactly how they stop doing that. It starts with "&", so it is spliced after "?". */}

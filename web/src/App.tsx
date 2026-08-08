@@ -159,6 +159,15 @@ export function App() {
   const [columnStats, setColumnStats] = useState<Record<string, ColumnStats>>({});
   const [liveRun, setLiveRun] = useState<{ columnIds: number[]; done: number; errors: number; skipped: number; total: number } | null>(null);
   const [openCell, setOpenCell] = useState<OpenCell | null>(null);
+  /**
+   * Selection mode — turned on from the table's ⋯ menu, off by default.
+   *
+   * The row/column/select-all checkboxes used to appear only on hover, which is undiscoverable: you
+   * cannot hover something you do not know is there. So they are shown only in this mode, and this
+   * mode is a named thing you switch on. Reset when the table changes, so a selection cannot carry
+   * across to a different set of rows.
+   */
+  const [bulkMode, setBulkMode] = useState(false);
 
   // The cell panel and the column editor are the SAME right-hand inspector — both are fixed `right: 0`
   // full-height drawers, so with both open they overlap: the wider editor's left edge juts out from
@@ -346,6 +355,9 @@ export function App() {
    */
   const [statsSettled, setStatsSettled] = useState(true);
   const statsSheetId = sheet?.id ?? null;
+  // Leaving a table leaves its selection mode: the checkboxes belong to a set of rows, and carrying
+  // the mode into a different table would show boxes over rows the user never chose to select.
+  useEffect(() => { setBulkMode(false); }, [statsSheetId]);
   useEffect(() => {
     if (statsSettled || !statsSheetId) return;
     let tries = 0;
@@ -1558,6 +1570,8 @@ export function App() {
                 sheet={sheet}
                 view={view}
                 visibleRows={visibleRows}
+                selectMode={bulkMode}
+                onToggleSelectMode={() => setBulkMode((v) => !v)}
                 onRenamed={(name) => { setSheet({ ...sheet, name }); setSheets((s) => s.map((x) => (x.id === sheet.id ? { ...x, name } : x))); }}
                 onBudgetSet={(budgetUsd) => {
                   setSheet({ ...sheet, budgetUsd });
@@ -1725,6 +1739,7 @@ export function App() {
               }
             }}
             onSelectAllRows={async () => (await api.allRowIds(sheet.id)).ids}
+            selectMode={bulkMode}
           />
           )}
 

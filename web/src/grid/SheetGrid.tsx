@@ -98,6 +98,9 @@ interface Props {
   /** Every row id in the table, for the header "select all rows" checkbox. The grid is virtualized,
    *  so it cannot gather them itself. */
   onSelectAllRows?: () => Promise<number[]>;
+  /** Selection mode, switched from the table's ⋯ menu. The checkboxes show only when it is on —
+   *  hidden otherwise, because a hover-only control is one nobody finds. */
+  selectMode?: boolean;
   /** Delete a checkbox-selected set of columns in one undoable step. */
   onDeleteColumns?: (columnIds: number[]) => Promise<void>;
   /**
@@ -140,7 +143,7 @@ export function SheetGrid({
   onRunScope, onRunRange, onExpandJson, onSendToTable, onRefreshDerived, onPinColumn, onMoveColumn,
   primaryColumnId, onSetPrimaryColumn,
   onAddRow, onInsertColumn, onDuplicateColumn, onSaveTemplate, onDescribeColumn, onFilterColumn, onDedupeColumn,
-  onNotice, onOverrideCell, onRowsAdded, onOpenRecord, onDeleteRows, onDeleteColumns, onSelectAllRows,
+  onNotice, onOverrideCell, onRowsAdded, onOpenRecord, onDeleteRows, onDeleteColumns, onSelectAllRows, selectMode,
 }: Props) {
   // Only decides whether to OFFER a control. Every one of these is checked again by the server on
   // the request itself, so this is presentation, not permission.
@@ -233,6 +236,8 @@ export function SheetGrid({
   // A new sheet is a new set of rows and columns; carrying a selection across would delete the wrong
   // things. Cleared on sheet change and whenever the column set shrinks (a delete elsewhere).
   useEffect(() => { clearSelection(); }, [sheetId, clearSelection]);
+  // Leaving select mode drops whatever was selected, so the boxes and the bulk bar vanish together.
+  useEffect(() => { if (!selectMode) clearSelection(); }, [selectMode, clearSelection]);
 
   const pickRow = useCallback((pos: number, id: number, e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
     setSelCols(new Set());
@@ -1510,7 +1515,7 @@ export function SheetGrid({
   };
 
   return (
-    <div className={`cc-grid${selRows.size > 0 ? " cc-grid--rowselect" : ""}${selCols.size > 0 ? " cc-grid--colselect" : ""}`}>
+    <div className={`cc-grid${selectMode ? " cc-grid--selectmode" : ""}${selRows.size > 0 ? " cc-grid--rowselect" : ""}${selCols.size > 0 ? " cc-grid--colselect" : ""}`}>
       {/* aria-colcount counts EVERY column the grid renders — the row-number gutter, the data
           columns, and the add-column header — because each of them announces a colindex below.
           It said `columns.length + 1` while the header row held 13 columnheaders for 11 columns,
@@ -1562,7 +1567,7 @@ export function SheetGrid({
           {/* Header row — sticky, sentence case, every column sortable with aria-sort. */}
           <div className="cc-grid__header" role="row">
             <div className="cc-grid__gutter cc-grid__gutter--head" role="columnheader" aria-colindex={1} aria-label="Row number">
-              {onDeleteRows && rowTotal > 0 && (
+              {onDeleteRows && selectMode && rowTotal > 0 && (
                 <button
                   type="button"
                   className={`cc-corner__check${allRowsSelected ? " cc-corner__check--all" : selRows.size > 0 ? " cc-corner__check--some" : ""}`}
@@ -1619,7 +1624,7 @@ export function SheetGrid({
                   )}
                   {/* Select this column for a bulk delete. Hover-revealed, and it stays once anything is
                       selected. stopPropagation so a click selects rather than starting a reorder drag. */}
-                  {renaming !== c.id && (onDeleteColumns || selCols.size > 0) && (
+                  {renaming !== c.id && selectMode && (onDeleteColumns || selCols.size > 0) && (
                     <button
                       type="button"
                       className="cc-th__check"
@@ -1749,7 +1754,7 @@ export function SheetGrid({
                   >
                     {/* The checkbox sits over the number: the number shows at rest, the box on hover or
                         once anything is selected, and clicking it selects instead of opening the row. */}
-                    {row && (onDeleteRows || selRows.size > 0) && (
+                    {row && selectMode && (onDeleteRows || selRows.size > 0) && (
                       <button
                         type="button"
                         className="cc-tr__check"
