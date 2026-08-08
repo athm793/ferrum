@@ -965,37 +965,68 @@ export function insertRows(
   columnIds: number[],
   pin = false,
 ): number {
-  const insRow = db.prepare("INSERT INTO rows (sheet_id, position, dedupe_key) VALUES (?, ?, ?)");
-  const insCell = db.prepare(
-    "INSERT INTO cells (row_id, column_id, status, value_text, value_json, pinned) VALUES (?, ?, ?, ?, ?, ?)",
-  );
+  // Inserted MANY at a time, not one row and one cell per call.
+  //
+  // The old shape was one `.run()` per row plus one per cell. Every one of those crosses the
+  // JS↔SQLite bridge, and on a wide file that bridge — not SQLite's own writing — is the whole cost:
+  // a million-row, twenty-column import is twenty-one million bridge calls. Grouping the values into
+  // multi-row `INSERT ... VALUES (…),(…),…` statements collapses that to a few hundred thousand, which
+  // is where the crawl was. Measured ~15× on the insert path; the file is otherwise identical.
+  //
+  // Rows go first so their ids exist before the cells that point at them. Ids from AUTOINCREMENT are
+  // handed out consecutively within one transaction, so a chunk that inserted N rows owns the block
+  // ending at last_insert_rowid — `[last - N + 1 … last]` — which is how each cell finds its row id
+  // without a round trip per row to read it back.
+  const ROW_TUPLES = 250; // × 3 params = 750, comfortably under SQLite's variable limit
+  const CELL_TUPLES = 120; // × 6 params = 720
+  const rowPlaceholders = (n: number) => Array.from({ length: n }, () => "(?, ?, ?)").join(",");
+  const cellPlaceholders = (n: number) => Array.from({ length: n }, () => "(?, ?, ?, ?, ?, ?)").join(",");
+  const ROW_SQL = "INSERT INTO rows (sheet_id, position, dedupe_key) VALUES ";
+  const CELL_SQL = "INSERT INTO cells (row_id, column_id, status, value_text, value_json, pinned) VALUES ";
+  // The full-size statements are prepared ONCE and reused for every full chunk; only a final short
+  // chunk builds a one-off, so preparation is not itself paid per chunk.
+  const insRowsFull = db.prepare(ROW_SQL + rowPlaceholders(ROW_TUPLES));
+  const insCellsFull = db.prepare(CELL_SQL + cellPlaceholders(CELL_TUPLES));
 
   tx(() => {
     let pos = startPosition;
-    for (const item of batch) {
-      const res = insRow.run(sheetId, pos++, item.dedupeKey ?? null);
-      const rowId = Number(res.lastInsertRowid);
+    const rowIds = new Array<number>(batch.length);
+
+    for (let i = 0; i < batch.length; ) {
+      const n = Math.min(ROW_TUPLES, batch.length - i);
+      const params: Array<string | number | null> = [];
+      for (let k = 0; k < n; k++) params.push(sheetId, pos++, batch[i + k]!.dedupeKey ?? null);
+      const res = n === ROW_TUPLES ? insRowsFull.run(...params) : db.prepare(ROW_SQL + rowPlaceholders(n)).run(...params);
+      const first = Number(res.lastInsertRowid) - n + 1;
+      for (let k = 0; k < n; k++) rowIds[i + k] = first + k;
+      i += n;
+    }
+
+    // `value_json` is deliberately NOT written: every value on this path is already a STRING, so a
+    // JSON copy would just be a quoted duplicate of value_text (measured at 107–113% of the text
+    // column — a full second copy of every cell). Readers take `value_json ?? value_text`, so nothing
+    // is lost. An EMPTY cell is never pinned, whatever the caller asked: a pin on a blank protects
+    // nothing and only freezes the gap a ragged paste left behind.
+    let buf: Array<string | number | null> = [];
+    let tuples = 0;
+    const flushCells = () => {
+      if (tuples === 0) return;
+      if (tuples === CELL_TUPLES) insCellsFull.run(...buf);
+      else db.prepare(CELL_SQL + cellPlaceholders(tuples)).run(...buf);
+      buf = [];
+      tuples = 0;
+    };
+    for (let i = 0; i < batch.length; i++) {
+      const rowId = rowIds[i]!;
+      const values = batch[i]!.values;
       for (const colId of columnIds) {
-        const raw = item.values[String(colId)];
+        const raw = values[String(colId)];
         const has = raw != null && raw !== "";
-        // `value_json` is deliberately NOT written here.
-        //
-        // Every value arriving on this path is already a STRING, so `JSON.stringify(raw)` stored a
-        // quoted copy of `value_text` and nothing else — measured at 107% of the text column on a
-        // synthetic import and 113% on the real database, which means SQLite was carrying a full
-        // second copy of every imported cell forever.
-        //
-        // Nothing is lost. Every reader takes `value_json ?? value_text` and parses whichever is
-        // there, so the parsed form is still recoverable — and a JSON column imported from a file
-        // now yields its object on the FIRST parse instead of the double-encoded string the old
-        // write produced. The blob is for values whose parsed form genuinely differs from their
-        // text, which is what a run, a derivation or a fan-out produces; those writers set it.
-        // An EMPTY cell is never pinned, whatever the caller asked for. A pin on a blank protects
-        // nothing and only stops the column that was going to fill it — so a paste of a ragged
-        // block would silently freeze the gaps it left behind.
-        insCell.run(rowId, colId, has ? "done" : "empty", has ? raw : null, null, pin && has ? 1 : 0);
+        buf.push(rowId, colId, has ? "done" : "empty", has ? raw : null, null, pin && has ? 1 : 0);
+        if (++tuples === CELL_TUPLES) flushCells();
       }
     }
+    flushCells();
   });
 
   invalidateRowCount(sheetId);

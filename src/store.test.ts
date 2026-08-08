@@ -81,6 +81,37 @@ test("a plain value is stored once, not duplicated into value_json", () => {
   assert.equal(getCell(rowId, colId)?.value, "Corrected by hand");
 });
 
+test("a batch spanning many insert chunks lands every cell on its own row, appends included", () => {
+  // insertRows groups rows and cells into multi-row INSERTs and reclaims each row's id from the block
+  // AUTOINCREMENT just handed out — `[last - N + 1 … last]`. If that reclamation were off by a row, or
+  // a chunk boundary split a row's cells from their id, cells would attach to the wrong rows silently.
+  // So: a batch larger than both chunk sizes (250 rows, 120 cell-tuples), with a distinct value in
+  // every cell, then a SECOND batch appended when rows already exist — the case that would expose a
+  // wrong id base — and every value is checked against the (batch, row, column) it must hold.
+  const sheet = createSheet("chunked-insert");
+  const cols = [addColumn(sheet.id, { name: "A" }), addColumn(sheet.id, { name: "B" }), addColumn(sheet.id, { name: "C" }), addColumn(sheet.id, { name: "D" })]
+    .map((c) => Number(c.id));
+  const N = 300; // > 250 rows/chunk, and 300×4 = 1200 cells > 120/chunk
+  const mkBatch = (tag: string) =>
+    Array.from({ length: N }, (_, r) => ({ values: Object.fromEntries(cols.map((id, c) => [String(id), `${tag}-${r}-${c}`])) }));
+
+  insertRows(sheet.id, mkBatch("X"), 0, cols);
+  insertRows(sheet.id, mkBatch("Y"), N, cols); // append: rows already exist
+
+  const rows = db.prepare("SELECT id, position FROM rows WHERE sheet_id = ? ORDER BY position").all(sheet.id) as any[];
+  assert.equal(rows.length, N * 2);
+  let mismatches = 0;
+  for (let ri = 0; ri < rows.length; ri++) {
+    const tag = ri < N ? "X" : "Y";
+    const localR = ri % N;
+    for (let c = 0; c < cols.length; c++) {
+      const cell = db.prepare("SELECT value_text FROM cells WHERE row_id = ? AND column_id = ?").get(rows[ri]!.id, cols[c]!) as any;
+      if (cell?.value_text !== `${tag}-${localR}-${c}`) mismatches++;
+    }
+  }
+  assert.equal(mismatches, 0, "every one of the 2,400 cells is on the right row and column");
+});
+
 test("the materialized view indexes are bounded, and the one in use survives the trim", () => {
   // A plain GET on the read path WRITES permanent rows into view_index, and nothing ever removed
   // them — 337 MB across 52 view keys on the real database, 21% of the whole file, for views nobody

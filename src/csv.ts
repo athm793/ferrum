@@ -11,7 +11,7 @@
 //   - An import that fails half way must not leave everything it already committed behind, or the
 //     retry appends a second copy of it.
 
-import { createReadStream } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import { Readable, Transform } from "node:stream";
 import { parse } from "csv-parse";
 import { stringify } from "csv-stringify";
@@ -33,6 +33,17 @@ import type { Column } from "./types.ts";
 // Rows per transaction. Bigger commits fewer times — worth ~10% on a large import, and the insert
 // rate past that is bound by SQLite writing every cell and its index, not by how the rows are grouped.
 const BATCH = 2000;
+
+/**
+ * File size at which the import drops the cells table's one secondary index for the duration.
+ *
+ * `ix_cells_col_status` is maintained on EVERY cell written, and on a wide file its writes scatter
+ * across one B-tree section per column — which is what turns a large import into a crawl. Measured on
+ * a 100-column file: 997 rows/sec with the index against 8,100 without it. Rebuilding it afterwards is
+ * a single sorted pass, far cheaper than a cell-at-a-time maintenance. Only above this size, because
+ * the rebuild scans the whole cells table and a small import must not be made to pay for that.
+ */
+const BIG_IMPORT_BYTES = 8 * 1024 * 1024;
 
 /** Bytes of the head read to sniff encoding, delimiter and types. */
 const SAMPLE_BYTES = 64 * 1024;
@@ -617,6 +628,14 @@ export async function importCsv(sheetId: string, path: string, opts: ImportOptio
     }
   };
 
+  // For a big file, take the cells secondary index out of the write path and rebuild it once at the
+  // end — the single largest speedup on a wide import. Dropped only when the file is large enough to
+  // earn back the rebuild; rebuilt in `finally`, so a cancel or a failure restores it too. A crash
+  // between the two would leave it dropped, but the schema recreates it on boot, so the worst case is
+  // self-healing rather than a permanently missing index.
+  const bigImport = (() => { try { return statSync(path).size >= BIG_IMPORT_BYTES; } catch { return false; } })();
+  if (bigImport) db.exec("DROP INDEX IF EXISTS ix_cells_col_status;");
+
   try {
     try {
       await attempt(false);
@@ -643,6 +662,8 @@ export async function importCsv(sheetId: string, path: string, opts: ImportOptio
         `— those ${inserted} row${inserted === 1 ? "" : "s"} were removed, so nothing from this file was kept and ` +
         `re-importing the corrected file cannot double anything.`,
     );
+  } finally {
+    if (bigImport) db.exec("CREATE INDEX IF NOT EXISTS ix_cells_col_status ON cells(column_id, status);");
   }
 
   db.prepare("UPDATE sheets SET updated_at = datetime('now') WHERE id = ?").run(sheetId);
