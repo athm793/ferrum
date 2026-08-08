@@ -1077,14 +1077,21 @@ export function deleteRow(rowId: number | string): string | null {
 export function deleteRows(sheetId: string, ids: Array<number | string>): number {
   const nums = [...new Set(ids.map(Number))].filter((n) => Number.isFinite(n));
   if (nums.length === 0) return 0;
-  const holes = nums.map(() => "?").join(",");
+  // Chunked, so a "select all" of a large table cannot exceed SQLite's bound on how many `?` one
+  // statement may carry. A single IN clause of every id would throw on the first over-limit delete —
+  // silent until someone selected enough rows, which is exactly what select-all makes easy to do.
+  const CHUNK = 900; // leaves headroom under the variable limit for the trailing sheet id
   let removed = 0;
   tx(() => {
-    // Cells first: a row with no cells is a valid (if empty) row, but a cell with no row is an orphan.
-    db.prepare(`DELETE FROM cells WHERE row_id IN (${holes}) AND row_id IN (SELECT id FROM rows WHERE sheet_id = ?)`)
-      .run(...nums, sheetId);
-    const res = db.prepare(`DELETE FROM rows WHERE id IN (${holes}) AND sheet_id = ?`).run(...nums, sheetId);
-    removed = Number(res.changes ?? 0);
+    for (let i = 0; i < nums.length; i += CHUNK) {
+      const slice = nums.slice(i, i + CHUNK);
+      const holes = slice.map(() => "?").join(",");
+      // Cells first: a row with no cells is a valid (if empty) row, but a cell with no row is an orphan.
+      db.prepare(`DELETE FROM cells WHERE row_id IN (${holes}) AND row_id IN (SELECT id FROM rows WHERE sheet_id = ?)`)
+        .run(...slice, sheetId);
+      const res = db.prepare(`DELETE FROM rows WHERE id IN (${holes}) AND sheet_id = ?`).run(...slice, sheetId);
+      removed += Number(res.changes ?? 0);
+    }
   });
   if (removed > 0) {
     invalidateRowCount(sheetId);

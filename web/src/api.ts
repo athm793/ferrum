@@ -554,6 +554,8 @@ export const api = {
   /** Delete many rows at once — the grid's checkbox selection. Undoable as one step. */
   deleteRows: (sheetId: string, ids: Array<string | number>) =>
     req<{ deleted: number }>(`/api/sheets/${sheetId}/rows/delete`, { method: "POST", body: JSON.stringify({ ids }) }),
+  /** Every row id in the table, in position order — backs the header "select all rows" checkbox. */
+  allRowIds: (sheetId: string) => req<{ ids: number[] }>(`/api/sheets/${sheetId}/row-ids`),
   /** Delete many columns at once — the header checkbox selection. Soft-deleted, undoable as one step. */
   deleteColumns: (sheetId: string, ids: Array<string | number>) =>
     req<{ deleted: number }>(`/api/sheets/${sheetId}/columns/delete`, { method: "POST", body: JSON.stringify({ ids }) }),

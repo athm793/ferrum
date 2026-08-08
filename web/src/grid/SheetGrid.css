@@ -411,6 +411,37 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
 .cc-th--sel .cc-th__check { background: var(--primary); border-color: var(--primary); color: #fff; }
 .cc-tr__check:hover, .cc-th__check:hover { border-color: var(--primary); }
 
+/* The header-corner "select all rows" box: the same control as the row checkboxes, centred in the
+   gutter head. Shown on header hover, or whenever a row selection exists so its state stays visible
+   while scrolled away. A tick means all, a dash means some. */
+.cc-grid__header .cc-grid__gutter--head { display: grid; place-items: center; }
+.cc-corner__check {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1.5px solid var(--ink-faint);
+  border-radius: 4px;
+  background: var(--canvas);
+  color: transparent;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 90ms ease, background 90ms ease, border-color 90ms ease;
+}
+.cc-corner__check::before { content: ""; position: absolute; inset: -9px; }
+.cc-grid__header:hover .cc-corner__check,
+.cc-grid--rowselect .cc-corner__check,
+.cc-corner__check--some,
+.cc-corner__check--all { opacity: 1; }
+.cc-corner__check--all,
+.cc-corner__check--some { background: var(--primary); border-color: var(--primary); color: #fff; }
+.cc-corner__check:hover:not(:disabled) { border-color: var(--primary); }
+.cc-corner__check:disabled { cursor: not-allowed; }
+.cc-grid__header:hover .cc-corner__check:disabled { opacity: 0.4; }
+@media (prefers-reduced-motion: reduce) { .cc-corner__check { transition: none; } }
+
 .cc-tr--sel .cc-grid__gutter { background: var(--primary-tint); }
 .cc-th--sel { box-shadow: inset 0 0 0 2px var(--primary); }
 

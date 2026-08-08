@@ -1737,6 +1737,17 @@ export function createServer(bootId: string) {
     res.json(win);
   }));
 
+  // Every row id in the table, in position order. Backs the header's "select all rows" checkbox: the
+  // grid is virtualized and holds only a window, so it cannot gather them itself. Offered only for the
+  // whole table — a narrowed view's select-all is a scope question this deliberately does not answer.
+  app.get("/api/sheets/:id/row-ids", wrap((req, res) => {
+    const sheetId = param(req, "id");
+    if (!getSheet(sheetId)) return res.status(404).json({ error: "Sheet not found" });
+    const ids = (db.prepare("SELECT id FROM rows WHERE sheet_id = ? ORDER BY position").all(sheetId) as Array<{ id: number }>)
+      .map((r) => Number(r.id));
+    res.json({ ids });
+  }));
+
   /**
    * Per-column completion stats for the header bars.
    *

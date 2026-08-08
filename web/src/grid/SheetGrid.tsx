@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { CSSProperties, ReactElement } from "react";
 import { useRowWindow } from "./useRowWindow.ts";
 import { api, type Column } from "../api.ts";
-import { viewQuery, type GridView } from "../view.ts";
+import { viewQuery, isNarrowed, type GridView } from "../view.ts";
 import { cellStore } from "../store/cellStore.ts";
 import type { CellStatus } from "../types.ts";
 import { Cell } from "./Cell.tsx";
@@ -95,6 +95,9 @@ interface Props {
   onDeleteRow?: (rowId: string) => void;
   /** Delete a checkbox-selected set of rows in one undoable step. Resolves once they are gone. */
   onDeleteRows?: (rowIds: number[]) => Promise<void>;
+  /** Every row id in the table, for the header "select all rows" checkbox. The grid is virtualized,
+   *  so it cannot gather them itself. */
+  onSelectAllRows?: () => Promise<number[]>;
   /** Delete a checkbox-selected set of columns in one undoable step. */
   onDeleteColumns?: (columnIds: number[]) => Promise<void>;
   /**
@@ -137,7 +140,7 @@ export function SheetGrid({
   onRunScope, onRunRange, onExpandJson, onSendToTable, onRefreshDerived, onPinColumn, onMoveColumn,
   primaryColumnId, onSetPrimaryColumn,
   onAddRow, onInsertColumn, onDuplicateColumn, onSaveTemplate, onDescribeColumn, onFilterColumn, onDedupeColumn,
-  onNotice, onOverrideCell, onRowsAdded, onOpenRecord, onDeleteRows, onDeleteColumns,
+  onNotice, onOverrideCell, onRowsAdded, onOpenRecord, onDeleteRows, onDeleteColumns, onSelectAllRows,
 }: Props) {
   // Only decides whether to OFFER a control. Every one of these is checked again by the server on
   // the request itself, so this is presentation, not permission.
@@ -273,6 +276,28 @@ export function SheetGrid({
       setDeleting(false);
     }
   }, [selRows, selCols, onDeleteRows, onDeleteColumns, clearSelection]);
+
+  // The header's select-all: fetch every row id (the grid only holds a window) and select them, or
+  // clear if they are already all selected. Offered only for the WHOLE table — a narrowed view's
+  // "all" is a scope question this does not try to answer, so with a filter or search on it is
+  // disabled rather than quietly selecting hidden rows too.
+  const rowTotal = cellStore.total;
+  const viewNarrowed = isNarrowed(view);
+  const allRowsSelected = rowTotal > 0 && selRows.size >= rowTotal;
+  const [selectingAll, setSelectingAll] = useState(false);
+  const toggleAllRows = useCallback(async () => {
+    if (allRowsSelected) { clearSelection(); return; }
+    if (!onSelectAllRows) return;
+    setSelectingAll(true);
+    try {
+      const ids = await onSelectAllRows();
+      setSelCols(new Set());
+      setSelRows(new Set(ids));
+      rowAnchor.current = null;
+    } finally {
+      setSelectingAll(false);
+    }
+  }, [allRowsSelected, onSelectAllRows, clearSelection]);
 
   // Pinned columns, kept on screen while the rest scrolls under them.
   //
@@ -1536,7 +1561,32 @@ export function SheetGrid({
         <div className="cc-grid__inner" style={{ width: totalWidth + 56 + 40 }}>
           {/* Header row — sticky, sentence case, every column sortable with aria-sort. */}
           <div className="cc-grid__header" role="row">
-            <div className="cc-grid__gutter cc-grid__gutter--head" role="columnheader" aria-colindex={1} aria-label="Row number" />
+            <div className="cc-grid__gutter cc-grid__gutter--head" role="columnheader" aria-colindex={1} aria-label="Row number">
+              {onDeleteRows && rowTotal > 0 && (
+                <button
+                  type="button"
+                  className={`cc-corner__check${allRowsSelected ? " cc-corner__check--all" : selRows.size > 0 ? " cc-corner__check--some" : ""}`}
+                  role="checkbox"
+                  aria-checked={allRowsSelected ? "true" : selRows.size > 0 ? "mixed" : "false"}
+                  aria-label={allRowsSelected ? "Clear row selection" : "Select all rows"}
+                  disabled={viewNarrowed || selectingAll}
+                  title={
+                    viewNarrowed ? "Select all covers the whole table — clear the filter and search first."
+                    : allRowsSelected ? "Clear the selection"
+                    : selectingAll ? "Selecting…"
+                    : `Select all ${rowTotal.toLocaleString()} ${rowTotal === 1 ? "row" : "rows"}`
+                  }
+                  onClick={(e) => { e.stopPropagation(); void toggleAllRows(); }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  {allRowsSelected
+                    ? <IconCheck />
+                    : selRows.size > 0
+                      ? <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M2.5 6h7" /></svg>
+                      : null}
+                </button>
+              )}
+            </div>
             {columns.map((c, ci) => {
               // Named `sorted`, not `active`: `active` is the roving-focus cell for the whole grid,
               // and shadowing it inside the header map is how the two got confused.

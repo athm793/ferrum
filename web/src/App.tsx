@@ -1724,6 +1724,7 @@ export function App() {
                 setToast(e instanceof Error ? e.message : "Could not delete those columns.");
               }
             }}
+            onSelectAllRows={async () => (await api.allRowIds(sheet.id)).ids}
           />
           )}
 
