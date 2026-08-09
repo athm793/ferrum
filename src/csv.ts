@@ -45,6 +45,33 @@ const BATCH = 2000;
  */
 const BIG_IMPORT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Database size above which the import KEEPS the index instead of dropping and rebuilding it.
+ *
+ * `ix_cells_col_status` is GLOBAL — every sheet's cells share it — so rebuilding it reads and
+ * re-sorts the ENTIRE cells table, not just the rows this import added. That is the right trade for a
+ * fresh bulk load, where the import is most of the data. But appending an 8 MB file to a database that
+ * already holds millions of cells would pay a full multi-gigabyte re-sort to save index maintenance on
+ * a few hundred thousand new rows — minutes of synchronous work that freezes the whole engine (node's
+ * SQLite runs on the one thread), during which the import cannot even stream its own progress, so the
+ * row counter sits frozen and the app looks hung. Above this size the index stays put and the import
+ * pays only the far cheaper incremental maintenance on its own rows. Sized so that a full rebuild below
+ * the ceiling stays a few seconds at most; ~256 MB is low millions of cells.
+ */
+const INDEX_REBUILD_CEILING_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Whether an import should drop the shared cells index and rebuild it once at the end.
+ *
+ * True only when the file is large enough to earn the rebuild AND the database is still small enough
+ * that rebuilding the whole-table index is quick — i.e. a fresh bulk load. On a database already past
+ * the ceiling (an append into a table with millions of existing cells) it is false, so the index
+ * stays put and the import never pays the multi-gigabyte re-sort that would freeze the engine.
+ */
+export function shouldDropCellsIndex(fileBytes: number, dbBytes: number): boolean {
+  return fileBytes >= BIG_IMPORT_BYTES && dbBytes < INDEX_REBUILD_CEILING_BYTES;
+}
+
 /** Bytes of the head read to sniff encoding, delimiter and types. */
 const SAMPLE_BYTES = 64 * 1024;
 
@@ -633,7 +660,23 @@ export async function importCsv(sheetId: string, path: string, opts: ImportOptio
   // earn back the rebuild; rebuilt in `finally`, so a cancel or a failure restores it too. A crash
   // between the two would leave it dropped, but the schema recreates it on boot, so the worst case is
   // self-healing rather than a permanently missing index.
-  const bigImport = (() => { try { return statSync(path).size >= BIG_IMPORT_BYTES; } catch { return false; } })();
+  // Drop-and-rebuild only when BOTH the file is large enough to earn the rebuild AND the table is
+  // still small enough that rebuilding the shared index is cheap. `page_count * page_size` is the
+  // database's size on disk, read from its header in O(1) — no scan. On a database already past the
+  // ceiling this stays false, so an append keeps the index and never triggers the whole-table re-sort
+  // that would otherwise freeze the engine for minutes. See INDEX_REBUILD_CEILING_BYTES.
+  const dbBytes = (() => {
+    try {
+      const pc = db.prepare("PRAGMA page_count").get() as { page_count?: number } | undefined;
+      const ps = db.prepare("PRAGMA page_size").get() as { page_size?: number } | undefined;
+      return (pc?.page_count ?? 0) * (ps?.page_size ?? 0);
+    } catch {
+      // Can't tell how big it is — assume large, so the safe (no-rebuild) path is taken.
+      return Number.MAX_SAFE_INTEGER;
+    }
+  })();
+  const fileBytes = (() => { try { return statSync(path).size; } catch { return 0; } })();
+  const bigImport = shouldDropCellsIndex(fileBytes, dbBytes);
   if (bigImport) db.exec("DROP INDEX IF EXISTS ix_cells_col_status;");
 
   try {

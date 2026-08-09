@@ -17,7 +17,7 @@ import { parse } from "csv-parse/sync";
 import { db } from "./db.ts";
 import type { FilterGroup } from "./filter.ts";
 import { addColumn, countRows, createSheet, getCell, insertRows, listColumns, readWindow, setCellValue } from "./store.ts";
-import { detectEncoding, exportCsv, guardFormula, ImportCancelled, importCsv, previewCsv, trimToCharBoundary , unguardFormula} from "./csv.ts";
+import { detectEncoding, exportCsv, guardFormula, ImportCancelled, importCsv, previewCsv, shouldDropCellsIndex, trimToCharBoundary , unguardFormula} from "./csv.ts";
 
 const SAMPLE_BYTES = 64 * 1024;
 
@@ -469,4 +469,32 @@ test("a filter the engine cannot apply refuses the export instead of widening it
     () => exportCsv(sheetId, { scope: { filter: { conj: "and", children: [{ columnId: 999999, op: "is", value: "x" }] } as any } }),
     /not started|could not/i,
   );
+});
+
+test("a big import drops the shared index only while the database is still small", () => {
+  // The index is global to every sheet, so rebuilding it re-sorts the WHOLE cells table. That is a
+  // fair trade for a fresh bulk load and a disaster for an 8MB append into a table with millions of
+  // existing cells: the same multi-gigabyte re-sort, to save maintenance on a few new rows, freezing
+  // the one engine thread for minutes. So the decision turns on BOTH the file size and how much is
+  // already there.
+  const MB = 1024 * 1024;
+  const smallFile = 1 * MB;
+  const bigFile = 8 * MB;         // the file-size threshold
+  const smallDb = 10 * MB;        // a fresh/empty database
+  const bigDb = 2 * 1024 * MB;    // 2GB — well past the rebuild ceiling
+
+  // A small file never drops the index — it would pay the rebuild without earning it.
+  assert.equal(shouldDropCellsIndex(smallFile, smallDb), false, "small file, small db");
+  assert.equal(shouldDropCellsIndex(smallFile, bigDb), false, "small file, big db");
+
+  // A big file drops it ONLY into a small database (fresh bulk load).
+  assert.equal(shouldDropCellsIndex(bigFile, smallDb), true, "big file, small db → drop+rebuild");
+
+  // The regression this guards: a big file appended to a big database KEEPS the index.
+  assert.equal(shouldDropCellsIndex(bigFile, bigDb), false, "big file, big db → keep index");
+
+  // Boundaries: exactly at the file threshold counts as big; exactly at the ceiling counts as large.
+  assert.equal(shouldDropCellsIndex(8 * MB, 255 * MB), true, "at file threshold, under ceiling");
+  assert.equal(shouldDropCellsIndex(8 * MB - 1, 10 * MB), false, "one byte under the file threshold");
+  assert.equal(shouldDropCellsIndex(8 * MB, 256 * MB), false, "at the ceiling → keep index");
 });
