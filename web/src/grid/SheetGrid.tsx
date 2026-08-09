@@ -274,35 +274,52 @@ export function SheetGrid({
   const confirmDelete = useCallback(async () => {
     setDeleting(true);
     try {
+      // Both, when both are selected — "select all rows and columns" then delete clears the table
+      // to nothing. Two separate calls so each is its own undoable step.
       if (selRows.size > 0) await onDeleteRows?.([...selRows]);
-      else if (selCols.size > 0) await onDeleteColumns?.([...selCols]);
+      if (selCols.size > 0) await onDeleteColumns?.([...selCols]);
       clearSelection();
     } finally {
       setDeleting(false);
     }
   }, [selRows, selCols, onDeleteRows, onDeleteColumns, clearSelection]);
 
-  // The header's select-all: fetch every row id (the grid only holds a window) and select them, or
-  // clear if they are already all selected. Offered only for the WHOLE table — a narrowed view's
-  // "all" is a scope question this does not try to answer, so with a filter or search on it is
-  // disabled rather than quietly selecting hidden rows too.
+  // Select-all, three ways. Rows come from the server (the grid only holds a window); columns are all
+  // already here. Offered for the WHOLE table only — a narrowed view's "all rows" is a scope question
+  // this does not answer, so the row and combined actions are disabled with a filter or search on,
+  // rather than quietly pulling in hidden rows.
   const rowTotal = cellStore.total;
   const viewNarrowed = isNarrowed(view);
   const allRowsSelected = rowTotal > 0 && selRows.size >= rowTotal;
+  const allColIds = useMemo(() => columns.map((c) => Number(c.id)), [columns]);
+  const allColsSelected = allColIds.length > 0 && selCols.size >= allColIds.length;
   const [selectingAll, setSelectingAll] = useState(false);
-  const toggleAllRows = useCallback(async () => {
-    if (allRowsSelected) { clearSelection(); return; }
+
+  const selectAllRows = useCallback(async () => {
     if (!onSelectAllRows) return;
     setSelectingAll(true);
-    try {
-      const ids = await onSelectAllRows();
-      setSelCols(new Set());
-      setSelRows(new Set(ids));
-      rowAnchor.current = null;
-    } finally {
-      setSelectingAll(false);
-    }
-  }, [allRowsSelected, onSelectAllRows, clearSelection]);
+    try { const ids = await onSelectAllRows(); setSelCols(new Set()); setSelRows(new Set(ids)); rowAnchor.current = null; }
+    finally { setSelectingAll(false); }
+  }, [onSelectAllRows]);
+
+  const selectAllCols = useCallback(() => {
+    setSelRows(new Set());
+    setSelCols(new Set(allColIds));
+    colAnchor.current = null;
+  }, [allColIds]);
+
+  const selectAllBoth = useCallback(async () => {
+    if (!onSelectAllRows) return;
+    setSelectingAll(true);
+    try { const ids = await onSelectAllRows(); setSelRows(new Set(ids)); setSelCols(new Set(allColIds)); }
+    finally { setSelectingAll(false); }
+  }, [onSelectAllRows, allColIds]);
+
+  // The header corner toggles all rows: select them, or clear if they are already all selected.
+  const toggleAllRows = useCallback(async () => {
+    if (allRowsSelected) { clearSelection(); return; }
+    await selectAllRows();
+  }, [allRowsSelected, clearSelection, selectAllRows]);
 
   // Pinned columns, kept on screen while the rest scrolls under them.
   //
@@ -1968,26 +1985,62 @@ export function SheetGrid({
         </Popover>
       )}
 
-      {/* Bulk action bar. Floats over the grid while a selection is live; the delete is one undoable
-          step, so it acts on click rather than behind a confirm — the same snappiness Clay has, with
-          Undo as the safety net. Rows and columns are mutually exclusive, so it names exactly one. */}
-      {(selRows.size > 0 || selCols.size > 0) && (() => {
-        const rows = selRows.size > 0;
-        const n = rows ? selRows.size : selCols.size;
-        const noun = rows ? `row${n === 1 ? "" : "s"}` : `column${n === 1 ? "" : "s"}`;
+      {/* Selection bar. Present the whole time select mode is on — its "select all" buttons are how a
+          whole-table selection is made — and it names exactly what is selected: rows, columns, or both.
+          The delete is one undoable step per axis, so it acts on click, with Undo as the safety net. */}
+      {(selectMode || selRows.size > 0 || selCols.size > 0) && (() => {
+        const r = selRows.size, c = selCols.size;
+        const parts: string[] = [];
+        if (r > 0) parts.push(`${r.toLocaleString()} row${r === 1 ? "" : "s"}`);
+        if (c > 0) parts.push(`${c.toLocaleString()} column${c === 1 ? "" : "s"}`);
+        const label = parts.length ? `${parts.join(" and ")} selected` : "Nothing selected";
+        const delNoun = r > 0 && c > 0 ? "rows & columns" : r > 0 ? `row${r === 1 ? "" : "s"}` : `column${c === 1 ? "" : "s"}`;
+        const rowsBlocked = viewNarrowed || !onSelectAllRows;
         return (
           <div className="cc-bulkbar" role="region" aria-label="Selection actions">
-            <span className="cc-bulkbar__count mono">{n.toLocaleString()} {noun} selected</span>
+            <span className="cc-bulkbar__count mono">{label}</span>
+            <span className="cc-bulkbar__sep" aria-hidden />
+            {/* The three whole-table selectors. Each shows as pressed when its set is fully chosen. */}
+            <span className="cc-bulkbar__group">
+              <span className="cc-bulkbar__lead">Select all</span>
+              <button
+                type="button"
+                className={`cc-btn cc-btn--ghost cc-btn--sm${allRowsSelected && c === 0 ? " is-on" : ""}`}
+                onClick={() => void selectAllRows()}
+                disabled={deleting || selectingAll || rowsBlocked}
+                title={rowsBlocked ? "Select all rows covers the whole table — clear the filter and search first." : `Select all ${rowTotal.toLocaleString()} rows`}
+              >
+                Rows
+              </button>
+              <button
+                type="button"
+                className={`cc-btn cc-btn--ghost cc-btn--sm${allColsSelected && r === 0 ? " is-on" : ""}`}
+                onClick={selectAllCols}
+                disabled={deleting || selectingAll || allColIds.length === 0}
+                title={`Select all ${allColIds.length} columns`}
+              >
+                Columns
+              </button>
+              <button
+                type="button"
+                className={`cc-btn cc-btn--ghost cc-btn--sm${allRowsSelected && allColsSelected ? " is-on" : ""}`}
+                onClick={() => void selectAllBoth()}
+                disabled={deleting || selectingAll || rowsBlocked || allColIds.length === 0}
+                title={rowsBlocked ? "Selecting all rows covers the whole table — clear the filter and search first." : "Select every row and every column"}
+              >
+                Rows &amp; columns
+              </button>
+            </span>
             <span className="cc-bulkbar__sep" aria-hidden />
             <button
               type="button"
               className="cc-btn cc-btn--danger cc-btn--sm"
               onClick={() => void confirmDelete()}
-              disabled={deleting}
+              disabled={deleting || (r === 0 && c === 0)}
             >
-              <IconTrash size={13} /> <span>{deleting ? "Deleting…" : `Delete ${noun}`}</span>
+              <IconTrash size={13} /> <span>{deleting ? "Deleting…" : `Delete ${delNoun}`}</span>
             </button>
-            <button type="button" className="cc-btn cc-btn--ghost cc-btn--sm" onClick={clearSelection} disabled={deleting}>
+            <button type="button" className="cc-btn cc-btn--ghost cc-btn--sm" onClick={clearSelection} disabled={deleting || (r === 0 && c === 0)}>
               Clear
             </button>
           </div>

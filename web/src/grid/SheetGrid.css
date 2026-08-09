@@ -471,7 +471,17 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
   animation: cc-bulkbar-in 130ms ease;
 }
 .cc-bulkbar__count { font-size: 12.5px; font-weight: 600; color: var(--ink); white-space: nowrap; }
-.cc-bulkbar__sep { width: 1px; height: 20px; background: var(--hairline); }
+.cc-bulkbar__sep { width: 1px; height: 20px; background: var(--hairline); flex: 0 0 auto; }
+.cc-bulkbar__group { display: flex; align-items: center; gap: 4px; }
+.cc-bulkbar__lead { font-size: 11.5px; color: var(--ink-faint); white-space: nowrap; margin-right: 2px; }
+/* A whole-table selector reads as pressed while its set is fully chosen. */
+.cc-bulkbar .cc-btn.is-on { background: var(--primary); border-color: var(--primary); color: #fff; }
+.cc-bulkbar .cc-btn.is-on:hover { background: var(--primary); }
+
+/* On a narrow screen the bar wraps to two rows and scrolls rather than pushing off-screen. */
+@media (max-width: 640px) {
+  .cc-bulkbar { max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; border-radius: 16px; }
+}
 
 @keyframes cc-bulkbar-in {
   from { opacity: 0; transform: translate(-50%, 8px); }
