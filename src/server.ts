@@ -52,7 +52,7 @@ import {
   createSource, deleteSource, deliver, findByToken, listDeliveries, listSources, rotateToken,
   updateSource, MAX_BODY_BYTES,
 } from "./sources/webhook.ts";
-import { exportCsv, ImportCancelled, importCsv, previewCsv } from "./csv.ts";
+import { exportCsv, ImportCancelled, importCsv, previewCsv, previewFromHead } from "./csv.ts";
 import { isColumnKind, isSheetKind, isValueType } from "./types.ts";
 import { checkKey, normalizeAgentSettings, searchCostUsd } from "./providers/openrouter.ts";
 import { catalogAge, listModels, type CatalogModel } from "./providers/catalog.ts";
@@ -5541,6 +5541,34 @@ export function createServer(bootId: string) {
    * Written under the app's own temp directory, never to a path the request chooses. The name is
    * generated; the one the user picked is kept only for display.
    */
+  app.post("/api/csv/preview-head", wrap(async (req, res) => {
+    // The browser sends ONLY the first chunk of the file here — enough to read the headers and a
+    // sample of rows — so the column-mapping screen can appear at once while the whole file finishes
+    // staging through /api/csv/upload in the background. Nothing is written to disk: the head is
+    // parsed in memory and thrown away. The capped read is a guard against a client sending more than
+    // it should, not a real limit — the preview never needs more than the first ~64KB.
+    const HEAD_CAP = 4 * 1024 * 1024;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const c of req) {
+        const b = c as Buffer;
+        chunks.push(b);
+        total += b.length;
+        if (total > HEAD_CAP) { req.destroy(); return res.status(413).json({ error: "Preview sample was larger than expected." }); }
+      }
+    } catch {
+      return res.status(400).json({ error: "That file could not be read." });
+    }
+    const head = Buffer.concat(chunks, total);
+    if (head.length === 0) return res.status(400).json({ error: "That file came through empty." });
+    try {
+      res.json({ preview: await previewFromHead(head) });
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  }));
+
   app.post("/api/csv/upload", wrap(async (req, res) => {
     mkdirSync(TMP_DIR, { recursive: true });
     sweepStagedUploads();

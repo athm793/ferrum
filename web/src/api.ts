@@ -597,6 +597,25 @@ export const api = {
       "/api/csv/preview",
       { method: "POST", body: JSON.stringify({ path }) },
     ),
+
+  /**
+   * Preview from the file's HEAD alone — the raw first chunk sent as the request body, not a staged
+   * path. Lets the mapping screen appear instantly while the whole file uploads in the background.
+   * Not routed through `req`, which forces a JSON content type; this body is raw bytes.
+   */
+  previewHead: async (head: Blob) => {
+    const res = await fetch("/api/csv/preview-head", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: head,
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      preview?: { headers: string[]; sampleRows: string[][]; inferredTypes: string[]; delimiter: string; encoding: string; raggedCount: number; quotesDisabled: boolean };
+      error?: string;
+    };
+    if (!res.ok || body.error || !body.preview) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    return body.preview;
+  },
   /**
    * Mirrors `ImportResult` in src/csv.ts — keep the two in step when a field is added or renamed.
    *

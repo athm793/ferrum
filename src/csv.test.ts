@@ -17,7 +17,8 @@ import { parse } from "csv-parse/sync";
 import { db } from "./db.ts";
 import type { FilterGroup } from "./filter.ts";
 import { addColumn, countRows, createSheet, getCell, insertRows, listColumns, readWindow, setCellValue } from "./store.ts";
-import { detectEncoding, exportCsv, guardFormula, ImportCancelled, importCsv, previewCsv, shouldDropCellsIndex, trimToCharBoundary , unguardFormula} from "./csv.ts";
+import { readFileSync } from "node:fs";
+import { detectEncoding, exportCsv, guardFormula, ImportCancelled, importCsv, previewCsv, previewFromHead, shouldDropCellsIndex, trimToCharBoundary , unguardFormula} from "./csv.ts";
 
 const SAMPLE_BYTES = 64 * 1024;
 
@@ -497,4 +498,35 @@ test("a big import drops the shared index only while the database is still small
   assert.equal(shouldDropCellsIndex(8 * MB, 255 * MB), true, "at file threshold, under ceiling");
   assert.equal(shouldDropCellsIndex(8 * MB - 1, 10 * MB), false, "one byte under the file threshold");
   assert.equal(shouldDropCellsIndex(8 * MB, 256 * MB), false, "at the ceiling → keep index");
+});
+
+test("the preview built from the file's head matches the one built from the whole file", async () => {
+  // The instant upload shows the mapping screen from the head bytes alone, before the full file has
+  // finished staging. That preview MUST match what the old whole-file path produced, or the columns a
+  // user maps against would not be the columns the import then reads.
+  const lines = ["Name,Email,Company"];
+  for (let i = 0; i < 5000; i++) lines.push(`Person ${i},p${i}@example.com,Company ${i}`);
+  const path = fixture(lines.join("\n") + "\n");
+
+  const fromFile = await previewCsv(path);
+  const head = readFileSync(path).subarray(0, 128 * 1024); // what the browser posts to preview-head
+  const fromHead = await previewFromHead(head);
+
+  assert.deepEqual(fromHead.headers, fromFile.headers, "same headers");
+  assert.equal(fromHead.delimiter, fromFile.delimiter, "same delimiter");
+  assert.equal(fromHead.encoding, fromFile.encoding, "same encoding");
+  assert.deepEqual(fromHead.sampleRows.slice(0, 5), fromFile.sampleRows.slice(0, 5), "same sample rows");
+  // The head of a 5000-row file is truncated mid-record; the partial trailing line must be dropped,
+  // never surfaced as a short row.
+  const width = fromHead.headers.length;
+  assert.ok(fromHead.sampleRows.every((r) => r.length === width), "no partial row from the cut");
+});
+
+test("a preview from a whole small file that fits within the head is identical either way", async () => {
+  // When the file is smaller than the head, preview-head sees the entire file — trailing bytes and
+  // all — so it must behave exactly like reading the file from disk, including a short final row.
+  const path = fixture("A,B,C\r\n1,2,3\r\n4,5,6\r\n");
+  const fromFile = await previewCsv(path);
+  const fromHead = await previewFromHead(readFileSync(path));
+  assert.deepEqual(fromHead, fromFile);
 });

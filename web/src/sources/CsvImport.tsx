@@ -11,11 +11,16 @@
 // neutral — a CSV header that matches an existing column is pre-aimed at it, because importing
 // "Email" into a sheet that has an Email column and getting "Email (2)" is never what anyone meant.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconPlus } from "../ui/Icon.tsx";
 import { Select } from "../ui/Select.tsx";
+import { api } from "../api.ts";
 import type { Column } from "../api.ts";
 import "./CsvImport.css";
+
+/** How much of the file's head the browser sends for the instant preview. The engine reads at most
+ *  ~64KB for a preview; 128KB is a comfortable margin that still posts in a blink. */
+const HEAD_BYTES = 128 * 1024;
 
 interface Preview {
   headers: string[];
@@ -93,9 +98,11 @@ function fmtSize(bytes: number): string {
 function uploadCsv(
   f: File,
   onProgress: (fraction: number) => void,
+  register?: (xhr: XMLHttpRequest) => void,
 ): Promise<{ path?: string; bytes?: number; preview?: Preview; error?: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    register?.(xhr);
     xhr.open("POST", "/api/csv/upload");
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
@@ -103,6 +110,8 @@ function uploadCsv(
       catch { reject(new Error("The engine's answer could not be read.")); }
     };
     xhr.onerror = () => reject(new Error("The upload could not reach the engine."));
+    // Choosing a different file (or closing) aborts the in-flight stage; that is not a failure.
+    xhr.onabort = () => reject(new DOMException("Upload aborted", "AbortError"));
     xhr.send(f);
   });
 }
@@ -125,44 +134,91 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
   const [uploadTotal, setUploadTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  /** The file the user picked, known immediately from the head preview — before the full upload
+   *  has finished staging it to disk. `file` (with a staged path) arrives only when staging is done. */
+  const [picked, setPicked] = useState<{ name: string; bytes: number } | null>(null);
+  /** True while the whole file uploads in the background, after the mapping screen is already shown. */
+  const [staging, setStaging] = useState(false);
+  /** The user pressed Import before the background upload finished; fire it the moment it lands. */
+  const [queuedImport, setQueuedImport] = useState(false);
+  /** The in-flight background upload, so choosing a different file can abort it. */
+  const stageXhrRef = useRef<XMLHttpRequest | null>(null);
 
-  const take = async (f: File) => {
-    if (!f) return;
-    setBusy("upload");
-    setError(null);
-    setResult(null);
+  /** Stage the WHOLE file to disk in the background while the user maps columns. The import needs the
+   *  complete file on disk, but the mapping screen only ever needed the head — so this runs behind it
+   *  instead of in front of it. Sets `file` (with the staged path) when it lands. */
+  const stageFull = async (f: File) => {
+    setStaging(true);
     setUploadFrac(0);
     setUploadTotal(f.size);
     try {
-      // XHR, not fetch: only XHR reports UPLOAD progress, and on a multi-gigabyte file the bytes take
-      // real time to reach the engine and be written to disk — a bar that moves is the difference
-      // between "working" and "frozen".
-      const res = await uploadCsv(f, setUploadFrac);
-      if (res.error || !res.path || !res.preview) { setError(res.error ?? "Could not read that file."); setPreview(null); return; }
-      const preview = res.preview;
+      const res = await uploadCsv(f, setUploadFrac, (xhr) => { stageXhrRef.current = xhr; });
+      if (res.error || !res.path) { setError(res.error ?? "The file could not be uploaded."); return; }
       setFile({ name: f.name, path: res.path, bytes: res.bytes ?? f.size });
-      setPreview(preview);
-      // Pre-aim each CSV column at an existing column when the names match. The engine would do the
-      // same quietly for "new" targets, but a default the screen SHOWS is one the user can veto.
-      const byKey = new Map(columns.map((c) => [keyOf(c.name), String(c.id)]));
-      setMappings(
-        preview.headers.map((h) => ({
-          target: byKey.get(keyOf(h)) ?? "new",
-          name: h,
-        })),
-      );
-      // An email-ish column is the natural dedupe key; suggested, never forced.
-      setDedupeOn(preview.headers.findIndex((h) => /email/i.test(h)));
-    } catch {
-      setError("Could not read that file.");
+    } catch (e) {
+      // An abort (the user picked a different file, or closed) is silent; a real failure is shown.
+      if (!(e instanceof DOMException && e.name === "AbortError")) setError("The file could not be uploaded.");
     } finally {
-      setBusy(null);
-      setUploadFrac(0);
+      stageXhrRef.current = null;
+      setStaging(false);
     }
   };
 
-  const doImport = async () => {
-    if (!file || !preview) return;
+  const take = async (f: File) => {
+    if (!f) return;
+    // A new pick abandons any upload still staging from the last one.
+    stageXhrRef.current?.abort();
+    stageXhrRef.current = null;
+    setStaging(false);
+    setError(null);
+    setResult(null);
+    setFile(null);
+    setPreview(null);
+    setMappings([]);
+    setProgress(null);
+    setQueuedImport(false);
+    setPicked({ name: f.name, bytes: f.size });
+
+    // 1. Show the mapping screen at once, from the file's head alone — no waiting for the whole
+    //    file to cross to the engine. This is the change that makes "select file → see columns"
+    //    feel instant on a file of any size.
+    setBusy("upload");
+    let preview: Preview;
+    try {
+      preview = await api.previewHead(f.slice(0, HEAD_BYTES));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read that file.");
+      setPicked(null);
+      setBusy(null);
+      return;
+    }
+    setPreview(preview);
+    // Pre-aim each CSV column at an existing column when the names match. The engine would do the
+    // same quietly for "new" targets, but a default the screen SHOWS is one the user can veto.
+    const byKey = new Map(columns.map((c) => [keyOf(c.name), String(c.id)]));
+    setMappings(preview.headers.map((h) => ({ target: byKey.get(keyOf(h)) ?? "new", name: h })));
+    // An email-ish column is the natural dedupe key; suggested, never forced.
+    setDedupeOn(preview.headers.findIndex((h) => /email/i.test(h)));
+    setBusy(null);
+
+    // 2. Stage the rest of the file in the background so it is on disk by the time Import is pressed.
+    void stageFull(f);
+  };
+
+  // If Import was pressed while the file was still staging, fire it the instant staging completes.
+  useEffect(() => {
+    if (queuedImport && file?.path && !staging) {
+      setQueuedImport(false);
+      void doImport(file.path);
+    }
+    // doImport is intentionally omitted: the effect runs after render, so it closes over the current
+    // preview/mappings/dedupe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queuedImport, file, staging]);
+
+  const doImport = async (stagedPath?: string) => {
+    const path = stagedPath ?? file?.path;
+    if (!path || !preview) return;
     setBusy("import");
     setError(null);
     setProgress(0);
@@ -174,7 +230,7 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
         signal: ctrl.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          path: file.path,
+          path,
           mappings: mappings.map((m) =>
             m.target === "new"
               ? { target: "new", name: m.name.trim() || undefined }
@@ -298,7 +354,10 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
         <p className="cc-csv__note">
           The sheet now has {result.rowCount.toLocaleString()} rows. Took {(result.ms / 1000).toFixed(1)}s.
         </p>
-        <button className="cc-btn cc-btn--xs" onClick={() => { setResult(null); setFile(null); setPreview(null); }}>
+        <button
+          className="cc-btn cc-btn--xs"
+          onClick={() => { setResult(null); setFile(null); setPreview(null); setPicked(null); setStaging(false); setQueuedImport(false); }}
+        >
           Import another file
         </button>
       </div>
@@ -329,12 +388,14 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
         />
         <p className="cc-csv__droptext">
           {busy === "upload"
-            ? uploadFrac < 1
+            ? "Reading the file…"
+            : staging
               ? `Uploading ${fmtSize(uploadTotal * uploadFrac)} of ${fmtSize(uploadTotal)} · ${Math.round(uploadFrac * 100)}%`
-              : "Reading the file…"
-            : file ? file.name : "Drop a CSV here, or"}
+              : picked ? picked.name : "Drop a CSV here, or"}
         </p>
-        {busy === "upload" && (
+        {/* The bar tracks the FULL file crossing to the engine in the background — the mapping table
+            below is already usable while it climbs. */}
+        {staging && (
           <div
             className="cc-csv__bar"
             role="progressbar"
@@ -342,14 +403,12 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
             aria-valuemin={0}
             aria-valuemax={100}
           >
-            {/* At 100% the bytes are in; the fill sits full while the engine sniffs the head, which is
-                what "Reading the file…" above is covering. */}
             <div className="cc-csv__bar-fill" style={{ width: `${Math.round(uploadFrac * 100)}%` }} />
           </div>
         )}
         {busy !== "upload" && (
           <button className="cc-btn" onClick={() => fileRef.current?.click()}>
-            <IconPlus /> <span>{file ? "Choose a different file" : "Choose a file"}</span>
+            <IconPlus /> <span>{picked ? "Choose a different file" : "Choose a file"}</span>
           </button>
         )}
       </div>
@@ -486,7 +545,9 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
             <span className={`cc-csv__meta mono${busy === "import" ? " cc-csv__meta--live" : ""}`}>
               {busy === "import"
                 ? `${(progress ?? 0).toLocaleString()} rows imported…`
-                : `${(file!.bytes / 1024 / 1024).toFixed(1)} MB · showing ${Math.min(5, preview.sampleRows.length)} rows`}
+                : staging
+                  ? `Uploading ${Math.round(uploadFrac * 100)}% of ${fmtSize(uploadTotal)}…`
+                  : `${(((file?.bytes ?? picked?.bytes) ?? 0) / 1024 / 1024).toFixed(1)} MB · showing ${Math.min(5, preview.sampleRows.length)} rows`}
             </span>
             {busy === "import" ? (
               <button className="cc-btn cc-btn--danger" onClick={cancelImport}>
@@ -495,11 +556,14 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
             ) : (
               <button
                 className="cc-btn cc-btn--primary"
-                onClick={() => void doImport()}
-                disabled={landing === 0}
+                // If the background upload has already landed, import now; if not, queue it and the
+                // effect fires it the moment the file is fully staged — so the user never waits on the
+                // upload before pressing the button, only after.
+                onClick={() => { if (file?.path && !staging) void doImport(); else setQueuedImport(true); }}
+                disabled={landing === 0 || queuedImport}
                 title={landing === 0 ? "Every column is being left out — nothing would arrive." : undefined}
               >
-                Import into this table
+                {queuedImport ? `Finishing upload… ${Math.round(uploadFrac * 100)}%` : "Import into this table"}
               </button>
             )}
           </div>

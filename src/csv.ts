@@ -248,7 +248,19 @@ export async function previewCsv(path: string, sampleSize = 50): Promise<CsvPrev
     s.on("end", () => res(Buffer.concat(chunks, n)));
     s.on("error", rej);
   });
+  return previewFromHead(head, sampleSize);
+}
 
+/**
+ * Build the preview from the file's head bytes alone.
+ *
+ * Split out from `previewCsv` so the upload can show the column-mapping screen the moment the
+ * browser has sent the first chunk of the file — without waiting for the whole file to finish
+ * staging to disk. The preview never looked at more than the first `SAMPLE_BYTES` anyway, so the
+ * mapping a user sees off the head is identical to the one they would have seen off the full file;
+ * the import still re-decides encoding and quoting against the complete file when it runs.
+ */
+export async function previewFromHead(head: Buffer, sampleSize = 50): Promise<CsvPreview> {
   // A short file was not cut by us, so its trailing bytes are the file's own business: an incomplete
   // sequence there is real damage and the detector should see it.
   const truncated = head.length >= SAMPLE_BYTES;
