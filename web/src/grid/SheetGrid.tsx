@@ -298,8 +298,15 @@ export function SheetGrid({
   const selectAllRows = useCallback(async () => {
     if (!onSelectAllRows) return;
     setSelectingAll(true);
-    try { const ids = await onSelectAllRows(); setSelCols(new Set()); setSelRows(new Set(ids)); rowAnchor.current = null; }
-    finally { setSelectingAll(false); }
+    // Capture the sheet/view before the fetch: if the user switches tables or changes the view while
+    // the row-id request is in flight, its result belongs to the OLD sheet and must be dropped, or a
+    // different table's row ids land in this one's selection. Mirrors ensurePage's generation guard.
+    const issuedFor = generation.current;
+    try {
+      const ids = await onSelectAllRows();
+      if (generation.current !== issuedFor) return;
+      setSelCols(new Set()); setSelRows(new Set(ids)); rowAnchor.current = null;
+    } finally { setSelectingAll(false); }
   }, [onSelectAllRows]);
 
   const selectAllCols = useCallback(() => {
@@ -311,8 +318,12 @@ export function SheetGrid({
   const selectAllBoth = useCallback(async () => {
     if (!onSelectAllRows) return;
     setSelectingAll(true);
-    try { const ids = await onSelectAllRows(); setSelRows(new Set(ids)); setSelCols(new Set(allColIds)); }
-    finally { setSelectingAll(false); }
+    const issuedFor = generation.current;
+    try {
+      const ids = await onSelectAllRows();
+      if (generation.current !== issuedFor) return;
+      setSelRows(new Set(ids)); setSelCols(new Set(allColIds));
+    } finally { setSelectingAll(false); }
   }, [onSelectAllRows, allColIds]);
 
   // The header corner toggles all rows: select them, or clear if they are already all selected.

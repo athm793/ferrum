@@ -5555,7 +5555,14 @@ export function createServer(bootId: string) {
         const b = c as Buffer;
         chunks.push(b);
         total += b.length;
-        if (total > HEAD_CAP) { req.destroy(); return res.status(413).json({ error: "Preview sample was larger than expected." }); }
+        if (total > HEAD_CAP) {
+          // Send the 413 WITHOUT destroying the request first: req.destroy() tears down the socket
+          // that the response shares, so the JSON body never flushes and the client gets an
+          // ECONNRESET instead of this message. Signal the connection will close (we are not going to
+          // read the rest of the body) and stop consuming it by returning.
+          res.setHeader("Connection", "close");
+          return res.status(413).json({ error: "Preview sample was larger than expected." });
+        }
       }
     } catch {
       return res.status(400).json({ error: "That file could not be read." });

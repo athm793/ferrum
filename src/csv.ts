@@ -261,6 +261,13 @@ export async function previewCsv(path: string, sampleSize = 50): Promise<CsvPrev
  * the import still re-decides encoding and quoting against the complete file when it runs.
  */
 export async function previewFromHead(head: Buffer, sampleSize = 50): Promise<CsvPreview> {
+  // Only ever look at the first SAMPLE_BYTES — the exact window previewCsv reads from a file — so a
+  // large head buffer (the browser may post up to a few hundred KB) yields the SAME preview the
+  // staged-file path would: the same encoding decision over the same bytes, not a wider one that
+  // could read utf8 vs latin1 differently. `end: SAMPLE_BYTES` on the file stream is inclusive, so
+  // mirror that with SAMPLE_BYTES + 1.
+  if (head.length > SAMPLE_BYTES + 1) head = head.subarray(0, SAMPLE_BYTES + 1);
+
   // A short file was not cut by us, so its trailing bytes are the file's own business: an incomplete
   // sequence there is real damage and the detector should see it.
   const truncated = head.length >= SAMPLE_BYTES;

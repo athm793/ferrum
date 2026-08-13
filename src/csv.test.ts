@@ -530,3 +530,23 @@ test("a preview from a whole small file that fits within the head is identical e
   const fromHead = await previewFromHead(readFileSync(path));
   assert.deepEqual(fromHead, fromFile);
 });
+
+test("previewFromHead ignores bytes past the sample window, matching previewCsv's encoding decision", async () => {
+  // The browser posts more than SAMPLE_BYTES of head. If previewFromHead scanned all of it, a latin1
+  // byte sitting PAST the 64KB window would flip its encoding to latin1 while previewCsv (which reads
+  // only the first SAMPLE_BYTES from the file) still reports utf8 — the two previews would disagree and
+  // the user would map against a differently-decoded sample than the import produces. The cap keeps
+  // them identical. Removing the `head.subarray(0, SAMPLE_BYTES + 1)` cap fails this test.
+  let body = "Name,Note\n";
+  while (Buffer.byteLength(body) < 70 * 1024) body += "Alice,ok\n"; // clean ASCII well past 64KB
+  // A lone 0xE9 (é in cp1252) followed by a newline is invalid UTF-8 → would force latin1 if seen.
+  const buf = Buffer.concat([Buffer.from(body, "utf8"), Buffer.from([0xe9]), Buffer.from("\nBob,ok\n")]);
+  const path = fixture(buf);
+
+  const fromFile = await previewCsv(path);      // reads only the first SAMPLE_BYTES of the file
+  const fromHead = await previewFromHead(buf);  // whole buffer, but capped internally to SAMPLE_BYTES
+
+  assert.equal(fromFile.encoding, "utf8", "the first 64KB are clean ASCII, so the file preview is utf8");
+  assert.equal(fromHead.encoding, fromFile.encoding, "the head preview must agree despite the late latin1 byte");
+  assert.deepEqual(fromHead.headers, fromFile.headers);
+});

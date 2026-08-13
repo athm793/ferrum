@@ -153,11 +153,21 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
     setUploadTotal(f.size);
     try {
       const res = await uploadCsv(f, setUploadFrac, (xhr) => { stageXhrRef.current = xhr; });
-      if (res.error || !res.path) { setError(res.error ?? "The file could not be uploaded."); return; }
+      if (res.error || !res.path) {
+        setError(res.error ?? "The file could not be uploaded.");
+        // A queued import can never run now — release the button instead of leaving it stuck on
+        // "Finishing upload…". (Only on a real failure; an abort is handled below.)
+        setQueuedImport(false);
+        return;
+      }
       setFile({ name: f.name, path: res.path, bytes: res.bytes ?? f.size });
     } catch (e) {
-      // An abort (the user picked a different file, or closed) is silent; a real failure is shown.
-      if (!(e instanceof DOMException && e.name === "AbortError")) setError("The file could not be uploaded.");
+      // An abort (the user picked a different file, or closed) is silent — take() already reset the
+      // queue. A real failure shows an error AND clears any queued import so the button recovers.
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setError("The file could not be uploaded.");
+        setQueuedImport(false);
+      }
     } finally {
       stageXhrRef.current = null;
       setStaging(false);
@@ -356,7 +366,7 @@ export function CsvImport({ sheetId, columns, onImported }: Props) {
         </p>
         <button
           className="cc-btn cc-btn--xs"
-          onClick={() => { setResult(null); setFile(null); setPreview(null); setPicked(null); setStaging(false); setQueuedImport(false); }}
+          onClick={() => { setResult(null); setFile(null); setPreview(null); setPicked(null); setStaging(false); setQueuedImport(false); setError(null); setUploadFrac(0); }}
         >
           Import another file
         </button>
