@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   addColumn, createSheet, deleteColumn, deleteRow, deleteSheet, getCell, getColumn, getSheet, insertRows,
-  listColumns, listSheets, readWindow, renameColumn, setCellValue, setColumnValueType,
+  isBackfilling, listColumns, listSheets, readWindow, renameColumn, setCellValue, setColumnValueType,
 } from "./store.ts";
 import { db } from "./db.ts";
 import { record, redo, snapshotRow, undo, undoState } from "./undo.ts";
@@ -377,4 +377,33 @@ test("a new column dodges the keys of DELETED columns too, not only the live one
     ["Industry", "Industry (3)"],
     "the deleted column stays invisible, and the new one lives beside the survivor",
   );
+});
+
+test("adding a column to a large table returns immediately and backfills its cells in the background", async () => {
+  // The freeze that made "+ Column" look dead: addColumn backfilled an empty cell for EVERY row inline,
+  // so on a 586k-row table it blocked the single-threaded engine for ~15s with no feedback. Above the
+  // threshold the column is returned at once and its cells fill in yielding background chunks. Below,
+  // it stays inline. This test proves both the instant return and the eventual completeness.
+  const sheet = createSheet("big-add");
+  const seed = addColumn(sheet.id, { name: "Seed" });      // small sheet → inline, instant
+  assert.equal(isBackfilling(Number(seed.id)), false, "an empty sheet backfills inline, not in the background");
+
+  // Seed just over the inline threshold (20,000).
+  const N = 25000, B = 5000;
+  for (let i = 0; i < N; i += B) {
+    insertRows(sheet.id, Array.from({ length: B }, (_, k) => ({ values: { [String(seed.id)]: "v" + (i + k) } })), i, [Number(seed.id)]);
+  }
+
+  const t = Date.now();
+  const col = addColumn(sheet.id, { name: "Added" });
+  const ms = Date.now() - t;
+  assert.ok(ms < 500, `addColumn on ${N} rows must return fast, took ${ms}ms`);
+  assert.equal(isBackfilling(Number(col.id)), true, "over the threshold, the backfill runs in the background");
+
+  // Wait for the background backfill, then every row must have a cell for the new column.
+  const deadline = Date.now() + 20000;
+  while (isBackfilling(Number(col.id)) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(isBackfilling(Number(col.id)), false, "the backfill finishes");
+  const cells = (db.prepare("SELECT COUNT(*) AS c FROM cells WHERE column_id = ?").get(Number(col.id)) as any).c;
+  assert.equal(cells, N, "every row ends up with a cell for the new column");
 });

@@ -367,11 +367,75 @@ export function addColumn(sheetId: string, input: NewColumn): Column {
       .run(sheetId, finalName, normalizeKey(finalName), pos, input.kind ?? "static", input.valueType ?? "text");
 
     const id = Number(res.lastInsertRowid);
-    // Every existing row needs a cell for the new column, or the grid has holes and a run has
-    // nothing to target.
-    backfillCells(sheetId, id);
+    // Every existing row gets an 'empty' cell for the new column so the per-column status histogram
+    // can count them. On a small table that is instant and done inline. On a large one it is hundreds
+    // of thousands of inserts — a synchronous SQLite write that would freeze the whole engine for many
+    // seconds (node:sqlite runs on the one thread), so the button that triggered it just hangs with no
+    // feedback. Above the threshold, the column is returned NOW and its cells are filled in yielding
+    // background chunks instead, so the UI is instant and the engine stays responsive while the
+    // progress fills in. The read path already renders a missing cell as empty, so the grid is correct
+    // the whole time.
+    const rowCount = Number((db.prepare("SELECT COUNT(*) AS c FROM rows WHERE sheet_id = ?").get(sheetId) as any).c);
+    if (rowCount <= BACKFILL_INLINE_MAX) {
+      backfillCells(sheetId, id);
+    } else {
+      scheduleBackfill(sheetId, id);
+    }
     return getColumn(id)!;
   });
+}
+
+/** Row count at or below which a new column backfills its cells inline (instant). Above it, the
+ *  backfill runs in the background so column creation never blocks the engine. */
+const BACKFILL_INLINE_MAX = 20_000;
+
+/** Rows per background-backfill chunk. Each chunk is one synchronous insert that blocks briefly, then
+ *  yields to the event loop so other requests are served between chunks. */
+const BACKFILL_CHUNK = 20_000;
+
+/** True while a column's cells are being backfilled in the background — so a caller can tell the
+ *  difference between "no cells yet" and "column fully populated". Keyed by column id. */
+const backfilling = new Set<number>();
+export function isBackfilling(columnId: number): boolean { return backfilling.has(columnId); }
+
+/**
+ * Fill a new column's empty cells in the background, a chunk at a time.
+ *
+ * Fire-and-forget: `addColumn` has already returned the column, so the UI shows it immediately. Each
+ * step inserts one CHUNK of rows' cells inside its own transaction (brief block), then reschedules via
+ * setImmediate so the event loop turns and the engine keeps answering. Cursor is by row id, ascending,
+ * so it makes forward progress even as rows are added. Errors are swallowed to a log — a failed
+ * backfill leaves some cells missing, which the read path renders as empty anyway, and the column can
+ * be re-run to populate them.
+ */
+function scheduleBackfill(sheetId: string, columnId: number): void {
+  backfilling.add(columnId);
+  let lastId = 0;
+  const step = (): void => {
+    try {
+      const batch = db
+        .prepare("SELECT id FROM rows WHERE sheet_id = ? AND id > ? ORDER BY id LIMIT ?")
+        .all(sheetId, lastId, BACKFILL_CHUNK) as Array<{ id: number }>;
+      if (batch.length === 0) {
+        backfilling.delete(columnId);
+        markColumnDirty(columnId);
+        return;
+      }
+      const hi = batch[batch.length - 1]!.id;
+      tx(() => {
+        db.prepare(
+          `INSERT OR IGNORE INTO cells (row_id, column_id, status)
+           SELECT id, ?, 'empty' FROM rows WHERE sheet_id = ? AND id > ? AND id <= ?`,
+        ).run(columnId, sheetId, lastId, hi);
+      });
+      lastId = hi;
+      setImmediate(step);
+    } catch (e) {
+      backfilling.delete(columnId);
+      console.error(`[backfill] column ${columnId} failed:`, e);
+    }
+  };
+  setImmediate(step);
 }
 
 /** A malformed blob must not take the whole column down — it degrades to defaults. */
