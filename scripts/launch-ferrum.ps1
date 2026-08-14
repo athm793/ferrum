@@ -28,22 +28,15 @@ $EngineLog = Join-Path $LogDir 'engine.log'
 $IconPath  = Join-Path $Root 'web\public\favicon.ico'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-# Load the GUI assemblies FIRST — the colour constants below are System.Drawing types, so a fresh
-# powershell.exe (which the shortcut launches) has not loaded them yet. Missing this made the script
-# crash on the first colour with the console hidden, i.e. "double-click does nothing".
+# Load the GUI assemblies FIRST — a fresh powershell.exe (which the shortcut launches) has not loaded
+# them, and the dialog is built from them below. Missing this made the script crash with the console
+# hidden, i.e. "double-click does nothing". The dialog is WPF (vector, real rounded corners, a soft
+# drop shadow, ClearType text — far cleaner than WinForms); WinForms is kept only for the rare
+# error-fallback MessageBox.
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-# ── Ferrum's own palette (web/src/styles/tokens.css, dark theme) so the dialog matches the app ──────
-$C_BG      = [System.Drawing.Color]::FromArgb(0x17,0x19,0x1a)  # --canvas
-$C_SUNK    = [System.Drawing.Color]::FromArgb(0x1d,0x20,0x21)  # --canvas-sunk
-$C_BORDER  = [System.Drawing.Color]::FromArgb(0x2c,0x30,0x31)
-$C_INK     = [System.Drawing.Color]::FromArgb(0xe8,0xea,0xeb)  # --ink
-$C_MUTE    = [System.Drawing.Color]::FromArgb(0x9a,0xa2,0xa8)  # --ink-mute
-$C_PRIMARY = [System.Drawing.Color]::FromArgb(0x12,0x7c,0x71)  # --primary
-$C_PRIMHOV = [System.Drawing.Color]::FromArgb(0x16,0x94,0x86)  # --primary-deep (dark: lighter on hover)
-$C_GHOSTHV = [System.Drawing.Color]::FromArgb(0x23,0x26,0x28)
 
 function Write-Log([string]$msg) {
     try { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg" | Add-Content -Path $LogFile -Encoding utf8 -ErrorAction Stop } catch { }
@@ -68,147 +61,177 @@ function Get-Port {
     return $p
 }
 
-# ── Small GUI helpers ──────────────────────────────────────────────────────────────────────────────
-function New-RoundedPath([int]$x, [int]$y, [int]$w, [int]$h, [int]$r) {
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $d = $r * 2
-    $path.AddArc($x, $y, $d, $d, 180, 90)
-    $path.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
-    $path.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
-    $path.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
-    $path.CloseFigure()
-    return $path
-}
+# Build the launcher dialog as a WPF window and return it (not shown yet, so it stays testable).
+# The window, the chosen action, and the primary button's meaning all live in SCRIPT scope so the
+# click handlers still resolve them after this function returns — a function-local would be gone by
+# the time ShowDialog (in Show-LauncherDialog) fires a handler. A handler writes $script:launcherChoice
+# ('open'|'restart'|'start'); Esc, the ×, and closing the window leave it at its 'cancel' default.
+function New-LauncherWindow([bool]$running) {
+    $script:primaryChoice = if ($running) { 'open' } else { 'start' }
 
-function New-Pill([string]$text, $back, $fore, $hover, [int]$w, [bool]$outlined) {
-    $b = New-Object System.Windows.Forms.Button
-    $b.Text = $text; $b.Width = $w; $b.Height = 38
-    $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0
-    $b.ForeColor = $fore; $b.BackColor = $back
-    $b.Font = New-Object System.Drawing.Font('Segoe UI', 9.75, [System.Drawing.FontStyle]::Regular)
-    $b.Cursor = 'Hand'; $b.TabStop = $false
-    if ($outlined) { $b.FlatAppearance.BorderSize = 1; $b.FlatAppearance.BorderColor = $script:C_BORDER }
-    $b.Region = New-Object System.Drawing.Region((New-RoundedPath 0 0 $b.Width $b.Height 10))
-    $b.Add_MouseEnter({ $this.BackColor = $hover }.GetNewClosure())
-    $b.Add_MouseLeave({ $this.BackColor = $back }.GetNewClosure())
-    return $b
-}
+    [xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" SizeToContent="WidthAndHeight"
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="True" Topmost="True"
+        FontFamily="Segoe UI" TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType">
+  <Window.Resources>
+    <Style x:Key="Primary" TargetType="Button">
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="FontSize" Value="12.5"/><Setter Property="Height" Value="38"/>
+      <Setter Property="MinWidth" Value="122"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="bd" CornerRadius="9" Background="#127c71" Padding="18,0">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#169486"/></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="bd" Property="Background" Value="#169486"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="Ghost" TargetType="Button">
+      <Setter Property="Foreground" Value="#e8eaeb"/>
+      <Setter Property="FontSize" Value="12.5"/><Setter Property="Height" Value="38"/>
+      <Setter Property="MinWidth" Value="94"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="bd" CornerRadius="9" Background="#1d2021" BorderBrush="#2c3031" BorderThickness="1" Padding="18,0">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="bd" Property="Background" Value="#26292b"/>
+              <Setter TargetName="bd" Property="BorderBrush" Value="#3a3f41"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="GhostText" TargetType="Button">
+      <Setter Property="Foreground" Value="#9aa2a8"/>
+      <Setter Property="FontSize" Value="12.5"/><Setter Property="Height" Value="38"/>
+      <Setter Property="MinWidth" Value="76"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="bd" CornerRadius="9" Background="Transparent" Padding="16,0">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="bd" Property="Background" Value="#1d2021"/>
+              <Setter Property="Foreground" Value="#e8eaeb"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="CloseStyle" TargetType="Button">
+      <Setter Property="Foreground" Value="#9aa2a8"/>
+      <Setter Property="FontSize" Value="14"/><Setter Property="Width" Value="30"/><Setter Property="Height" Value="30"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="bd" CornerRadius="8" Background="Transparent">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="bd" Property="Background" Value="#26292b"/>
+              <Setter Property="Foreground" Value="#e8eaeb"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+  <Window.Triggers>
+    <EventTrigger RoutedEvent="Window.Loaded">
+      <BeginStoryboard><Storyboard>
+        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.13"/>
+      </Storyboard></BeginStoryboard>
+    </EventTrigger>
+  </Window.Triggers>
+  <Border Margin="26" CornerRadius="15" Background="#17191a" BorderBrush="#2c3031" BorderThickness="1">
+    <Border.Effect><DropShadowEffect BlurRadius="38" ShadowDepth="9" Direction="270" Color="#000000" Opacity="0.6"/></Border.Effect>
+    <Grid Width="420" Margin="30,26,30,28">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <Grid Grid.Row="0">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+          <Border Width="34" Height="34" CornerRadius="8" Background="#127c71">
+            <Grid>
+              <TextBlock Text="26" FontFamily="Consolas" FontSize="7.5" Foreground="#FFFFFF" Opacity="0.72"
+                         HorizontalAlignment="Left" VerticalAlignment="Top" Margin="5,3.5,0,0"/>
+              <TextBlock Text="Fe" FontSize="16.5" FontWeight="SemiBold" Foreground="#FFFFFF"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,2,0,0"/>
+            </Grid>
+          </Border>
+          <TextBlock Text="Ferrum" FontSize="17" FontWeight="SemiBold" Foreground="#e8eaeb" Margin="13,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <Button x:Name="CloseBtn" Style="{StaticResource CloseStyle}" Content="&#x2715;"
+                HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,-6,0"/>
+      </Grid>
+      <StackPanel Grid.Row="1" Margin="0,24,0,0">
+        <TextBlock x:Name="HeadText" FontSize="15.5" Foreground="#e8eaeb" TextWrapping="Wrap"/>
+        <TextBlock x:Name="SubText" FontSize="11.5" Foreground="#9aa2a8" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="18"/>
+      </StackPanel>
+      <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,28,0,0">
+        <Button x:Name="BtnCancel" Style="{StaticResource GhostText}" Content="Cancel" IsCancel="True"/>
+        <Button x:Name="BtnRestart" Style="{StaticResource Ghost}" Content="Restart" Margin="9,0,0,0"/>
+        <Button x:Name="BtnPrimary" Style="{StaticResource Primary}" Content="Open Ferrum" Margin="9,0,0,0" IsDefault="True"/>
+      </StackPanel>
+    </Grid>
+  </Border>
+</Window>
+"@
 
-# Build the launcher dialog. A button handler records the choice into $script:launcherChoice
-# ('open'|'restart'|'start'); the × and closing the window leave it at its 'cancel' default.
-function New-LauncherForm([bool]$running, [int]$port) {
-    $f = New-Object System.Windows.Forms.Form
-    $f.FormBorderStyle = 'None'; $f.StartPosition = 'CenterScreen'
-    $f.Size = New-Object System.Drawing.Size(460, 250)
-    $f.BackColor = $script:C_BG
-    # Launched from a hidden console, the dialog can open behind other windows — force it to the front.
-    $f.TopMost = $true; $f.ShowInTaskbar = $true
-    $f.Add_Shown({ $this.TopMost = $true; $this.Activate(); $this.BringToFront() })
-    if (Test-Path $script:IconPath) { try { $f.Icon = New-Object System.Drawing.Icon($script:IconPath) } catch {} }
-    $f.Region = New-Object System.Drawing.Region((New-RoundedPath 0 0 $f.Width $f.Height 16))
-    $f.Add_Paint({
-        param($s, $e)
-        $e.Graphics.SmoothingMode = 'AntiAlias'
-        $pen = New-Object System.Drawing.Pen($script:C_BORDER, 1)
-        $e.Graphics.DrawPath($pen, (New-RoundedPath 0 0 ($s.Width - 1) ($s.Height - 1) 16))
-    })
-    # Drag anywhere on the header via the Win32 caption trick.
-    $f.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.Handle) } })
+    $script:launcherWin = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+    $win = $script:launcherWin
 
-    # Logo
-    if (Test-Path $script:IconPath) {
-        $logo = New-Object System.Windows.Forms.PictureBox
-        $logo.SizeMode = 'Zoom'; $logo.Size = New-Object System.Drawing.Size(30, 30)
-        $logo.Location = New-Object System.Drawing.Point(26, 24)
-        try { $logo.Image = (New-Object System.Drawing.Icon($script:IconPath, 64, 64)).ToBitmap() } catch {}
-        $logo.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.FindForm().Handle) } })
-        $f.Controls.Add($logo)
-    }
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = 'Ferrum'; $title.AutoSize = $true
-    $title.ForeColor = $script:C_INK
-    $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
-    $title.Location = New-Object System.Drawing.Point(64, 27)
-    $title.BackColor = [System.Drawing.Color]::Transparent
-    $title.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.FindForm().Handle) } })
-    $f.Controls.Add($title)
+    $head    = $win.FindName('HeadText')
+    $sub     = $win.FindName('SubText')
+    $primary = $win.FindName('BtnPrimary')
+    $restart = $win.FindName('BtnRestart')
+    $cancel  = $win.FindName('BtnCancel')
+    $close   = $win.FindName('CloseBtn')
 
-    # Close ×
-    $close = New-Object System.Windows.Forms.Label
-    $close.Text = [char]0x00D7; $close.AutoSize = $false
-    $close.Size = New-Object System.Drawing.Size(30, 30)
-    $close.TextAlign = 'MiddleCenter'
-    $close.Font = New-Object System.Drawing.Font('Segoe UI', 15)
-    $close.ForeColor = $script:C_MUTE; $close.BackColor = [System.Drawing.Color]::Transparent
-    $close.Location = New-Object System.Drawing.Point(($f.Width - 44), 20)
-    $close.Cursor = 'Hand'
-    $close.Add_MouseEnter({ $this.ForeColor = $script:C_INK })
-    $close.Add_MouseLeave({ $this.ForeColor = $script:C_MUTE })
-    $close.Add_Click({ $this.FindForm().Close() })   # Tag stays at its 'cancel' default
-    $f.Controls.Add($close)
-
-    # Heading + subtext
-    $head = New-Object System.Windows.Forms.Label
-    $head.AutoSize = $false; $head.Size = New-Object System.Drawing.Size(408, 26)
-    $head.Location = New-Object System.Drawing.Point(26, 82)
-    $head.ForeColor = $script:C_INK
-    $head.Font = New-Object System.Drawing.Font('Segoe UI', 12)
-    $head.BackColor = [System.Drawing.Color]::Transparent
-    $sub = New-Object System.Windows.Forms.Label
-    $sub.AutoSize = $false; $sub.Size = New-Object System.Drawing.Size(408, 40)
-    $sub.Location = New-Object System.Drawing.Point(26, 110)
-    $sub.ForeColor = $script:C_MUTE
-    $sub.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
-    $sub.BackColor = [System.Drawing.Color]::Transparent
     if ($running) {
         $head.Text = 'Ferrum is already running.'
-        $sub.Text  = "Open the app you have, or restart it to load the latest version."
+        $sub.Text  = 'Open the app you have, or restart it to load the latest version.'
+        $primary.Content = 'Open Ferrum'
+        $restart.Visibility = 'Visible'
     } else {
         $head.Text = 'Ferrum is not running.'
-        $sub.Text  = "Start the engine and open it in your browser."
+        $sub.Text  = 'Start the engine and open it in your browser.'
+        $primary.Content = 'Start Ferrum'
+        $restart.Visibility = 'Collapsed'
     }
-    $f.Controls.Add($head); $f.Controls.Add($sub)
 
-    # Buttons, right-aligned along the bottom
-    $y = 178
-    # The choice goes into a SCRIPT-SCOPED variable, not onto the form. Two other approaches were
-    # tested and both silently failed: a captured closure over $f did not carry the form into the
-    # nested scriptblock, and mutating a property on the form object from inside the handler did not
-    # persist to the outer reference. Writing $script:launcherChoice from the handler DOES persist
-    # (verified). Each button carries its own choice on its .Tag; $this is the clicked button.
-    $onClick = { $script:launcherChoice = $this.Tag; $this.FindForm().Close() }
-    $mk = {
-        param($text, $back, $fore, $hover, $w, $outlined, $tag)
-        $b = New-Pill $text $back $fore $hover $w $outlined
-        $b.Tag = $tag
-        $b.Add_Click($onClick)
-        return $b
+    $primary.Add_Click({ $script:launcherChoice = $script:primaryChoice; $script:launcherWin.Close() })
+    $restart.Add_Click({ $script:launcherChoice = 'restart'; $script:launcherWin.Close() })
+    $cancel.Add_Click({  $script:launcherChoice = 'cancel';  $script:launcherWin.Close() })
+    $close.Add_Click({   $script:launcherChoice = 'cancel';  $script:launcherWin.Close() })
+
+    # Frameless window: drag it by its body. Bring it to the front when it opens (hidden console).
+    $win.Add_MouseLeftButtonDown({ try { $script:launcherWin.DragMove() } catch {} })
+    $win.Add_Loaded({ $script:launcherWin.Activate() })
+    if (Test-Path $script:IconPath) {
+        try { $win.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$script:IconPath) } catch {}
     }
-    if ($running) {
-        $open    = & $mk 'Open Ferrum' $script:C_PRIMARY ([System.Drawing.Color]::White) $script:C_PRIMHOV 128 $false 'open'
-        $restart = & $mk 'Restart'     $script:C_SUNK    $script:C_INK                    $script:C_GHOSTHV 96  $true  'restart'
-        $cancel  = & $mk 'Cancel'      $script:C_BG      $script:C_MUTE                   $script:C_GHOSTHV 80  $false 'cancel'
-        $open.Location    = New-Object System.Drawing.Point(($f.Width - 26 - $open.Width), $y)
-        $restart.Location = New-Object System.Drawing.Point(($open.Left - 10 - $restart.Width), $y)
-        $cancel.Location  = New-Object System.Drawing.Point(($restart.Left - 6 - $cancel.Width), $y)
-        $f.Controls.Add($open); $f.Controls.Add($restart); $f.Controls.Add($cancel)
-        $f.AcceptButton = $open
-    } else {
-        $start  = & $mk 'Start Ferrum' $script:C_PRIMARY ([System.Drawing.Color]::White) $script:C_PRIMHOV 128 $false 'start'
-        $cancel = & $mk 'Cancel'       $script:C_BG      $script:C_MUTE                  $script:C_GHOSTHV 80  $false 'cancel'
-        $start.Location  = New-Object System.Drawing.Point(($f.Width - 26 - $start.Width), $y)
-        $cancel.Location = New-Object System.Drawing.Point(($start.Left - 6 - $cancel.Width), $y)
-        $f.Controls.Add($start); $f.Controls.Add($cancel)
-        $f.AcceptButton = $start
-    }
-    return $f
+    return $win
 }
 
 function Show-LauncherDialog([bool]$running, [int]$port) {
-    $script:launcherChoice = 'cancel'   # default; a button handler overwrites it, the × leaves it
-    $f = New-LauncherForm $running $port
-    [void]$f.ShowDialog()
-    $f.Dispose()
+    $script:launcherChoice = 'cancel'   # default; a button handler overwrites it, Esc/× leave it
+    $win = New-LauncherWindow $running
+    [void]$win.ShowDialog()
     return $script:launcherChoice
 }
 
@@ -262,19 +285,6 @@ function Start-Engine([int]$port, [string]$url) {
         Start-Sleep -Milliseconds 400
     }
     Show-Problem "The engine did not come up on port $port within 45 seconds."
-}
-
-# ── Win32 drag helper (used by the borderless dialog) ──────────────────────────────────────────────
-if (-not ('FerrumDrag' -as [type])) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class FerrumDrag {
-    [DllImport("user32.dll")] public static extern bool ReleaseCapture();
-    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
-    public static void Go(IntPtr h) { ReleaseCapture(); SendMessage(h, 0xA1, 0x2, 0); }
-}
-"@
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────────────────────────
