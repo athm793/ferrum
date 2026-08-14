@@ -28,6 +28,13 @@ $EngineLog = Join-Path $LogDir 'engine.log'
 $IconPath  = Join-Path $Root 'web\public\favicon.ico'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# Load the GUI assemblies FIRST — the colour constants below are System.Drawing types, so a fresh
+# powershell.exe (which the shortcut launches) has not loaded them yet. Missing this made the script
+# crash on the first colour with the console hidden, i.e. "double-click does nothing".
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
 # ── Ferrum's own palette (web/src/styles/tokens.css, dark theme) so the dialog matches the app ──────
 $C_BG      = [System.Drawing.Color]::FromArgb(0x17,0x19,0x1a)  # --canvas
 $C_SUNK    = [System.Drawing.Color]::FromArgb(0x1d,0x20,0x21)  # --canvas-sunk
@@ -87,17 +94,16 @@ function New-Pill([string]$text, $back, $fore, $hover, [int]$w, [bool]$outlined)
     return $b
 }
 
-# Build the launcher dialog. Returns the form; the caller reads $form.Tag ('open'|'restart'|'start'|'cancel').
+# Build the launcher dialog. A button handler records the choice into $script:launcherChoice
+# ('open'|'restart'|'start'); the × and closing the window leave it at its 'cancel' default.
 function New-LauncherForm([bool]$running, [int]$port) {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    [System.Windows.Forms.Application]::EnableVisualStyles()
-
     $f = New-Object System.Windows.Forms.Form
     $f.FormBorderStyle = 'None'; $f.StartPosition = 'CenterScreen'
     $f.Size = New-Object System.Drawing.Size(460, 250)
     $f.BackColor = $script:C_BG
-    $f.Tag = 'cancel'
+    # Launched from a hidden console, the dialog can open behind other windows — force it to the front.
+    $f.TopMost = $true; $f.ShowInTaskbar = $true
+    $f.Add_Shown({ $this.TopMost = $true; $this.Activate(); $this.BringToFront() })
     if (Test-Path $script:IconPath) { try { $f.Icon = New-Object System.Drawing.Icon($script:IconPath) } catch {} }
     $f.Region = New-Object System.Drawing.Region((New-RoundedPath 0 0 $f.Width $f.Height 16))
     $f.Add_Paint({
@@ -107,7 +113,7 @@ function New-LauncherForm([bool]$running, [int]$port) {
         $e.Graphics.DrawPath($pen, (New-RoundedPath 0 0 ($s.Width - 1) ($s.Height - 1) 16))
     })
     # Drag anywhere on the header via the Win32 caption trick.
-    $f.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($f.Handle) } }.GetNewClosure())
+    $f.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.Handle) } })
 
     # Logo
     if (Test-Path $script:IconPath) {
@@ -115,7 +121,7 @@ function New-LauncherForm([bool]$running, [int]$port) {
         $logo.SizeMode = 'Zoom'; $logo.Size = New-Object System.Drawing.Size(30, 30)
         $logo.Location = New-Object System.Drawing.Point(26, 24)
         try { $logo.Image = (New-Object System.Drawing.Icon($script:IconPath, 64, 64)).ToBitmap() } catch {}
-        $logo.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($f.Handle) } }.GetNewClosure())
+        $logo.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.FindForm().Handle) } })
         $f.Controls.Add($logo)
     }
     $title = New-Object System.Windows.Forms.Label
@@ -124,7 +130,7 @@ function New-LauncherForm([bool]$running, [int]$port) {
     $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
     $title.Location = New-Object System.Drawing.Point(64, 27)
     $title.BackColor = [System.Drawing.Color]::Transparent
-    $title.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($f.Handle) } }.GetNewClosure())
+    $title.Add_MouseDown({ if ($_.Button -eq 'Left') { [FerrumDrag]::Go($this.FindForm().Handle) } })
     $f.Controls.Add($title)
 
     # Close ×
@@ -138,7 +144,7 @@ function New-LauncherForm([bool]$running, [int]$port) {
     $close.Cursor = 'Hand'
     $close.Add_MouseEnter({ $this.ForeColor = $script:C_INK })
     $close.Add_MouseLeave({ $this.ForeColor = $script:C_MUTE })
-    $close.Add_Click({ $f.Tag = 'cancel'; $f.Close() }.GetNewClosure())
+    $close.Add_Click({ $this.FindForm().Close() })   # Tag stays at its 'cancel' default
     $f.Controls.Add($close)
 
     # Heading + subtext
@@ -165,10 +171,17 @@ function New-LauncherForm([bool]$running, [int]$port) {
 
     # Buttons, right-aligned along the bottom
     $y = 178
+    # The choice goes into a SCRIPT-SCOPED variable, not onto the form. Two other approaches were
+    # tested and both silently failed: a captured closure over $f did not carry the form into the
+    # nested scriptblock, and mutating a property on the form object from inside the handler did not
+    # persist to the outer reference. Writing $script:launcherChoice from the handler DOES persist
+    # (verified). Each button carries its own choice on its .Tag; $this is the clicked button.
+    $onClick = { $script:launcherChoice = $this.Tag; $this.FindForm().Close() }
     $mk = {
         param($text, $back, $fore, $hover, $w, $outlined, $tag)
         $b = New-Pill $text $back $fore $hover $w $outlined
-        $b.Add_Click({ $f.Tag = $tag; $f.Close() }.GetNewClosure())
+        $b.Tag = $tag
+        $b.Add_Click($onClick)
         return $b
     }
     if ($running) {
@@ -192,10 +205,11 @@ function New-LauncherForm([bool]$running, [int]$port) {
 }
 
 function Show-LauncherDialog([bool]$running, [int]$port) {
+    $script:launcherChoice = 'cancel'   # default; a button handler overwrites it, the × leaves it
     $f = New-LauncherForm $running $port
     [void]$f.ShowDialog()
-    $tag = $f.Tag; $f.Dispose()
-    return $tag
+    $f.Dispose()
+    return $script:launcherChoice
 }
 
 function Show-Problem([string]$summary) {
