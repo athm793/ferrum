@@ -15,6 +15,7 @@ import { db } from "./db.ts";
 import { addColumn, createSheet, getColumn, insertRows } from "./store.ts";
 import { createServer } from "./server.ts";
 import { DEFAULT_HTTP, normalizeHttpConfig } from "./http/httpColumn.ts";
+import { createSource, listDeliveries, updateSource } from "./sources/webhook.ts";
 import { saveScript } from "./scripts.ts";
 import { undo } from "./undo.ts";
 import { createWorkbook, trashTable } from "./views.ts";
@@ -810,4 +811,30 @@ test("the inside of a restricted workbook is a 404 to someone without a grant", 
   } finally {
     ctx.release();
   }
+});
+
+test("a delivery to a switched-off source is recorded, and still answers exactly like a wrong token", async () => {
+  // The route answered !source.enabled with its 404 before deliver() was reached, so
+  // recordDisabledDelivery — written for exactly this — had no caller and neither counter moved.
+  // "We switched it off and they kept sending" is the one thing the delivery list exists to show.
+  // The 404 must not change shape: a distinct answer for "this token exists but is off" tells a
+  // prober which tokens are real.
+  const { sheet } = fixture("hook-off");
+  const source = createSource(sheet.id, "Off source");
+  updateSource(source.id, { enabled: false });
+
+  const off = await call(`/hook/${source.token}`, { method: "POST", body: { plan: "enterprise" } });
+  const wrong = await call("/hook/no-such-token-here", { method: "POST", body: { plan: "enterprise" } });
+  assert.equal(off.status, 404);
+  assert.equal(wrong.status, 404);
+  assert.deepEqual(off.body, wrong.body, "identical to a wrong token, so the endpoint is not an oracle");
+
+  // And the sender who kept posting is on the record, with what they sent.
+  const deliveries = listDeliveries(source.id);
+  const first = deliveries[0];
+  assert.ok(first, "the attempt is recorded");
+  assert.equal(deliveries.length, 1);
+  assert.equal(first.ok, false);
+  assert.ok(first.note?.includes("switched off"), first.note ?? "");
+  assert.ok(first.body.includes("enterprise"), "the body they sent is kept");
 });

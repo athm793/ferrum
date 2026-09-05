@@ -49,8 +49,8 @@ import {
   markApplied, parseReply, type Action, type Message,
 } from "./setup/assistant.ts";
 import {
-  createSource, deleteSource, deliver, findByToken, listDeliveries, listSources, rotateToken,
-  updateSource, MAX_BODY_BYTES,
+  createSource, deleteSource, deliver, findByToken, listDeliveries, listSources, recordDisabledDelivery,
+  rotateToken, updateSource, MAX_BODY_BYTES,
 } from "./sources/webhook.ts";
 import { exportCsv, ImportCancelled, importCsv, previewCsv, previewFromHead } from "./csv.ts";
 import { isColumnKind, isSheetKind, isValueType } from "./types.ts";
@@ -2955,7 +2955,15 @@ export function createServer(bootId: string) {
    */
   app.post("/hook/:token", wrap((req, res) => {
     const source = findByToken(param(req, "token"));
-    if (!source || !source.enabled) return res.status(404).json({ error: "Not found" });
+    if (!source) return res.status(404).json({ error: "Not found" });
+    if (!source.enabled) {
+      // The 404 below stays identical to a wrong token's — that is the non-oracle rule. But the
+      // owner still gets the attempt written down first: "we switched it off and they kept sending"
+      // is the one thing the delivery list exists to show. The record is for the owner, the
+      // response is for the stranger.
+      recordDisabledDelivery(source, Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body ?? ""));
+      return res.status(404).json({ error: "Not found" });
+    }
 
     const raw = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body ?? "");
     let parsed: unknown;
