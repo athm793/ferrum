@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   addColumn, createSheet, deleteColumn, deleteRow, deleteSheet, getCell, getColumn, getSheet, insertRows,
-  isBackfilling, listColumns, listSheets, readWindow, renameColumn, setCellValue, setColumnValueType,
+  isBackfilling, listColumns, listSheets, readGroupedWindow, readWindow, renameColumn, setCellValue, setColumnValueType,
 } from "./store.ts";
 import { db } from "./db.ts";
 import { record, redo, snapshotRow, undo, undoState } from "./undo.ts";
@@ -406,4 +406,52 @@ test("adding a column to a large table returns immediately and backfills its cel
   assert.equal(isBackfilling(Number(col.id)), false, "the backfill finishes");
   const cells = (db.prepare("SELECT COUNT(*) AS c FROM cells WHERE column_id = ?").get(Number(col.id)) as any).c;
   assert.equal(cells, N, "every row ends up with a cell for the new column");
+});
+
+test("a grouped window paginates in display space, headers before their groups", () => {
+  const sheet = createSheet("grp");
+  const company = addColumn(sheet.id, { name: "Company" });
+  const city = addColumn(sheet.id, { name: "City" });
+  const ids = [Number(company.id), Number(city.id)];
+  insertRows(
+    sheet.id,
+    [
+      { values: { [ids[0]!]: "Acme", [ids[1]!]: "Berlin" } },
+      { values: { [ids[0]!]: "Acme", [ids[1]!]: "Berlin" } },
+      { values: { [ids[0]!]: "Beta", [ids[1]!]: "Berlin" } },
+      { values: { [ids[0]!]: "Beta", [ids[1]!]: "Lima" } },
+      { values: { [ids[0]!]: "Norfolk" } }, // no city: the blank group
+    ],
+    0,
+    ids,
+  );
+
+  const win = readGroupedWindow(sheet.id, 0, 100, {}, ids[1]!);
+  // Grouping orders by the group column (blanks last), so: Berlin x3, Lima x1, blank x1 —
+  // five rows plus three headers, and a display total that counts BOTH.
+  assert.equal(win.total, 8);
+  assert.equal(win.groups, 3);
+
+  const first = win.entries[0]!;
+  assert.equal(first.kind, "header");
+  assert.equal(first.label, "Berlin");
+  assert.equal(first.n, 3, "the count is over the whole view, not the loaded window");
+  const rows = win.entries.filter((e) => e.kind === "row");
+  assert.equal(rows.length, 5);
+  assert.ok(win.entries.some((e) => e.kind === "header" && e.label === null), "blank values are a group, not a scatter");
+  // Row records carry their VIEW position — the number "open this row as a record" has to hand back.
+  const withPos = rows[0]!.row!;
+  assert.equal(typeof withPos.position, "number");
+  assert.equal(withPos.cells[ids[0]!]!.v, "Acme");
+
+  // A window that starts mid-display starts mid-group: display offsets are honored, not row offsets.
+  const page2 = readGroupedWindow(sheet.id, 3, 2, {}, ids[1]!);
+  assert.equal(page2.total, 8);
+  assert.equal(page2.entries.length, 2);
+  assert.equal(page2.entries[0]!.kind, "row", "display slot 3 is the third Berlin row");
+  assert.equal(page2.entries[1]!.kind, "header", "display slot 4 is Lima's header");
+
+  // Read twice: the second read answers from the built index and must not drift.
+  const again = readGroupedWindow(sheet.id, 0, 100, {}, ids[1]!);
+  assert.deepEqual(again.entries.map((e) => e.kind), win.entries.map((e) => e.kind));
 });

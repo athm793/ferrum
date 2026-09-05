@@ -1524,22 +1524,35 @@ export function readWindow(
 
   if (rows.length === 0) return { rows: [], total, offset };
 
-  // Two ways to fetch the window's cells, chosen by how dense the row ids are:
-  //
-  //   BETWEEN — one contiguous scan of the clustered primary key. Ideal, but only valid when the
-  //             window's rows are actually adjacent.
-  //   IN      — required once a filter makes the rows sparse. A filtered window can span row 12 to
-  //             row 998,004, and BETWEEN over that range would read MILLIONS of cells to return 200
-  //             rows' worth.
-  //
-  // Picking the wrong one here is silent: the result is still correct, it is just catastrophically
-  // slow, so the density check is the guard.
-  //
-  // min/max are computed across the WHOLE window, not read off the first and last row. Those two are
-  // only the extremes when the window is ordered by id, which stopped being true the moment sorting
-  // by a column arrived: a descending sort routinely puts a high id first, so `rows[0].id` was the
-  // MAXIMUM, `BETWEEN max AND min` matched nothing, and the resulting negative span also satisfied
-  // the density test — so it took the empty path and every cell in the window came back blank.
+  return { rows: shapeWindowRows(rows), total, offset };
+}
+
+/**
+ * The window's rows with their cells, in the shape the grid's store ingests.
+ *
+ * Shared with `readGroupedWindow`, which must return records a client cannot tell apart from this
+ * one's — two shapings of one row is how a grouped grid and its record view drift.
+ *
+ * Two ways to fetch the window's cells, chosen by how dense the row ids are:
+ *
+ *   BETWEEN — one contiguous scan of the clustered primary key. Ideal, but only valid when the
+ *             window's rows are actually adjacent.
+ *   IN      — required once a filter makes the rows sparse. A filtered window can span row 12 to
+ *             row 998,004, and BETWEEN over that range would read MILLIONS of cells to return 200
+ *             rows' worth.
+ *
+ * Picking the wrong one here is silent: the result is still correct, it is just catastrophically
+ * slow, so the density check is the guard.
+ *
+ * min/max are computed across the WHOLE window, not read off the first and last row. Those two are
+ * only the extremes when the window is ordered by id, which stopped being true the moment sorting
+ * by a column arrived: a descending sort routinely puts a high id first, so `rows[0].id` was the
+ * MAXIMUM, `BETWEEN max AND min` matched nothing, and the resulting negative span also satisfied
+ * the density test — so it took the empty path and every cell in the window came back blank.
+ */
+function shapeWindowRows(rows: Array<{ id: number; position: number }>): Array<{ id: string; position: number; cells: Record<string, GridCell> }> {
+  if (rows.length === 0) return [];
+
   let minId = rows[0]!.id;
   let maxId = rows[0]!.id;
   for (const r of rows) {
@@ -1582,13 +1595,171 @@ export function readWindow(
     bucket[String(c.column_id)] = cell;
   }
 
-  return {
-    rows: rows.map((r) => ({ id: String(r.id), position: r.position, cells: byRow.get(r.id)! })),
-    total,
-    offset,
-  };
+  return rows.map((r) => ({ id: String(r.id), position: r.position, cells: byRow.get(r.id)! }));
 }
 
+// ─────────────────────────────────────────────────────────────── grouped windows
+
+/** How many grouped-display indexes ONE sheet may keep. Same discipline as the row indexes. */
+const MAX_GROUP_INDEXES_PER_SHEET = 2;
+
+function trimGroupIndexes(sheetId: string, keepKey: string): void {
+  const stale = (
+    db
+      .prepare(
+        `SELECT view_key FROM view_index_meta
+          WHERE sheet_id = ? AND view_key <> ? AND view_key LIKE 'g|%'
+          ORDER BY built_at DESC, rowid DESC
+          LIMIT -1 OFFSET ?`,
+      )
+      .all(sheetId, keepKey, MAX_GROUP_INDEXES_PER_SHEET - 1) as any[]
+  ).map((r) => String(r.view_key));
+  if (stale.length === 0) return;
+
+  const holes = stale.map(() => "?").join(",");
+  db.prepare(`DELETE FROM group_index WHERE view_key IN (${holes})`).run(...stale);
+  db.prepare(`DELETE FROM view_index_meta WHERE view_key IN (${holes})`).run(...stale);
+}
+
+export interface GroupedEntry {
+  kind: "header" | "row";
+  /** A header: the group's value in display form (null = the blank group) and its row count. */
+  label?: string | null;
+  n?: number;
+  /** A row: the same record `readWindow` returns, VIEW position included. */
+  row?: { id: string; position: number; cells: Record<string, GridCell> };
+}
+
+export interface GroupedWindow {
+  entries: GroupedEntry[];
+  /** The DISPLAY count — rows plus headers. The grid paginates over this. */
+  total: number;
+  offset: number;
+  /** How many groups the whole view holds. */
+  groups: number;
+}
+
+/**
+ * A window of a GROUPED view, paginated in DISPLAY space.
+ *
+ * Grouping is a header line before each run of equal values, which means offset 20 stops naming
+ * "the 20th row" and starts naming "the 20th line on screen". So the window is answered over a
+ * materialized DISPLAY index — one header per group, then its member rows, densely numbered — built
+ * once per (view, group column) and invalidated by the same data version as the row index it hangs
+ * off. Counts are counted over the WHOLE view at build time, because a count of the rows loaded so
+ * far is a number that changes as you scroll, and a label that lies is worse than no label.
+ *
+ * Grouping IS ordering by the group column: a group scattered across the sheet is not a group. The
+ * sort is forced, overriding whatever the client sent, and the runs path is untouched — `viewScope`
+ * never hears about grouping, so what runs is unaffected by what is grouped.
+ */
+export function readGroupedWindow(
+  sheetId: string,
+  offset: number,
+  limit: number,
+  opts: ReadOptions,
+  groupColumnId: number,
+): GroupedWindow {
+  const groupCol = listColumns(sheetId).find((c) => Number(c.id) === groupColumnId);
+  if (!groupCol) throw new Error("The column to group by is not in this table.");
+
+  const forced: ReadOptions = { ...opts, sort: { columnId: groupColumnId, dir: "asc" } };
+  const types = new Map<number, ValueType>();
+  let compiled: { sql: string | null; params: Array<string | number> } = { sql: null, params: [] };
+  if (forced.filter) {
+    for (const c of listColumns(sheetId)) types.set(Number(c.id), c.valueType);
+    compiled = compileFilter(forced.filter, types);
+  }
+  const search = (forced.search ?? "").trim();
+  if (search) {
+    compiled = compiled.sql
+      ? { sql: `(${compiled.sql}) AND ${SEARCH_PREDICATE}`, params: [...compiled.params, `%${escapeLike(search)}%`] }
+      : { sql: SEARCH_PREDICATE, params: [`%${escapeLike(search)}%`] };
+  }
+
+  const idx = ensureViewIndex(sheetId, forced, { sql: compiled.sql ?? "1", params: compiled.params });
+  const gkey = "g|" + idx.key + "|c" + groupColumnId;
+  const version = currentDataVersion(sheetId);
+
+  const meta = db.prepare("SELECT row_count, data_version FROM view_index_meta WHERE view_key = ?").get(gkey) as any;
+  if (!meta || Number(meta.data_version) !== version) {
+    tx(() => {
+      db.prepare("DELETE FROM group_index WHERE view_key = ?").run(gkey);
+      // One pass for the member rows, one for the headers. A header carries MIN(seq) — its group's
+      // first position — so the display ordering (position, header-first on ties) puts each header
+      // immediately before its own group. Blank values group together under one header, same as
+      // any other value: NULLs are a group, not a scatter.
+      db.prepare(
+        `INSERT INTO group_index (view_key, dseq, row_id, is_head, label, n)
+         SELECT ?, ROW_NUMBER() OVER (ORDER BY s, is_head DESC) - 1, rid, is_head, label, n
+           FROM (
+             SELECT vi.seq AS s, vi.row_id AS rid, 0 AS is_head,
+                    CAST(NULL AS TEXT) AS label, CAST(NULL AS INTEGER) AS n
+               FROM view_index vi WHERE vi.view_key = ?
+             UNION ALL
+             SELECT MIN(vi.seq), CAST(NULL AS INTEGER), 1,
+                    COALESCE(c.value_text, c.value_json), COUNT(*)
+               FROM view_index vi
+               LEFT JOIN cells c ON c.row_id = vi.row_id AND c.column_id = ?
+              WHERE vi.view_key = ?
+              GROUP BY COALESCE(c.value_text, c.value_json)
+           )`,
+      ).run(gkey, idx.key, groupColumnId, idx.key);
+
+      const display = Number(
+        (db.prepare("SELECT COUNT(*) AS c FROM group_index WHERE view_key = ?").get(gkey) as any).c,
+      );
+      db.prepare(
+        `INSERT INTO view_index_meta (view_key, sheet_id, row_count, data_version, built_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(view_key) DO UPDATE SET row_count = excluded.row_count,
+                                             data_version = excluded.data_version,
+                                             built_at = excluded.built_at`,
+      ).run(gkey, sheetId, display, version);
+      trimGroupIndexes(sheetId, gkey);
+    });
+  }
+
+  const slot = db
+    .prepare(
+      `SELECT dseq, row_id, is_head, label, n FROM group_index WHERE view_key = ? AND dseq >= ? AND dseq < ? ORDER BY dseq`,
+    )
+    .all(gkey, offset, offset + limit) as any[];
+
+  // Row ids in display order, then their VIEW positions — the position a client hands back for
+  // "open this row as a record" must be the row's own place in the view, not its display slot.
+  const rowIds = slot.filter((s) => !s.is_head).map((s) => Number(s.row_id));
+  const seqOf = new Map<number, number>();
+  if (rowIds.length > 0) {
+    const seqs = db
+      .prepare(`SELECT row_id, seq FROM view_index WHERE view_key = ? AND row_id IN (${rowIds.map(() => "?").join(",")})`)
+      .all(idx.key, ...rowIds) as any[];
+    for (const r of seqs) seqOf.set(Number(r.row_id), Number(r.seq));
+  }
+  const positionOf = new Map<string, number>();
+  for (const s of slot) {
+    if (!s.is_head) {
+      const pos = seqOf.get(Number(s.row_id));
+      if (pos != null) positionOf.set(String(s.row_id), pos);
+    }
+  }
+
+  const shaped = shapeWindowRows(rowIds.map((id) => ({ id, position: positionOf.get(String(id)) ?? 0 })));
+  const byId = new Map(shaped.map((r) => [r.id, r]));
+
+  const entries: GroupedEntry[] = slot.map((s) =>
+    s.is_head
+      ? { kind: "header" as const, label: s.label ?? null, n: Number(s.n) }
+      : { kind: "row" as const, row: byId.get(String(s.row_id)) },
+  );
+
+  const groups = Number(
+    (db.prepare("SELECT COUNT(*) AS c FROM group_index WHERE view_key = ? AND is_head = 1").get(gkey) as any).c,
+  );
+  const display = Number(meta?.row_count ?? (offset + entries.length));
+
+  return { entries, total: display, offset, groups };
+}
 // ─────────────────────────────────────────────────────────────── cell reads / writes
 
 /**

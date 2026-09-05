@@ -41,6 +41,7 @@ const fingerprint = (v: GridView) =>
     sort: v.sort,
     search: v.search.trim(),
     hidden: [...v.hidden].sort((a, b) => a - b),
+    groupBy: v.groupBy,
   });
 
 export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onSetDefaultView, openedWith }: Props) {
@@ -95,6 +96,7 @@ export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onS
         sorts: view.sort ? [view.sort] : [],
         search: view.search.trim() || null,
         columns: { hidden: view.hidden },
+        groupBy: view.groupBy,
       };
       const res = await fetch(`/api/sheets/${sheetId}/views`, {
         method: "POST",
@@ -130,6 +132,7 @@ export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onS
           sorts: view.sort ? [view.sort] : [],
           search: view.search.trim() || null,
           columns: { hidden: view.hidden },
+          groupBy: view.groupBy,
         }),
       });
       const body = await res.json().catch(() => null);

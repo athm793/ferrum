@@ -777,6 +777,21 @@ db.exec(`
     built_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- The display index for a GROUPED view: one header row per group, then its member rows, numbered
+  -- densely in DISPLAY order so the grid can paginate over headers without knowing where they fall.
+  -- view_key here is "g|<the row view's key>|c<column id>", and row_count in view_index_meta —
+  -- sharing that table, the same data_version invalidation and the same trim discipline — is the
+  -- DISPLAY count (rows + headers), not the row count.
+  CREATE TABLE IF NOT EXISTS group_index (
+    view_key TEXT    NOT NULL,
+    dseq     INTEGER NOT NULL,      -- dense 0..n-1, a header immediately before its group
+    row_id   INTEGER,               -- null on a header
+    is_head  INTEGER NOT NULL,
+    label    TEXT,                  -- the group's value in display form; null = the blank group
+    n        INTEGER,               -- rows in the group, counted over the WHOLE view
+    PRIMARY KEY (view_key, dseq)
+  ) WITHOUT ROWID;
+
   -- ───────────────────────────────────────────────────────────── ops
 
   CREATE TABLE IF NOT EXISTS kv (

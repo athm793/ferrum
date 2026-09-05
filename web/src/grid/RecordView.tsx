@@ -71,7 +71,10 @@ export function RecordView({
     const ticket = ++load.current;
     setFields(null);
     setError(null);
-    api.readRows(sheetId, position, 1, view)
+    // Grouping stripped: this `position` is the row's own place in the VIEW, and the grouped
+    // endpoint paginates in DISPLAY space — headers interleaved — where the same number names a
+    // different line. The record page reads rows, never display slots.
+    api.readRows(sheetId, position, 1, { ...view, groupBy: null })
       .then((win) => {
         if (ticket !== load.current) return;
         const row = win.rows[0];

@@ -28,13 +28,20 @@ export interface GridView {
    * Column ids the grid does NOT render, as numbers to match the engine's
    * `views.columns_json.hidden` and `sort.columnId` beside it.
    *
-   * Presentation only, and deliberately kept out of `viewQuery` and `viewScope`: hiding a column
-   * changes what is on screen, never which rows a run covers or what an export carries.
+   * Presentation only, and deliberately kept out of `viewScope`: hiding a column changes what is
+   * on screen, never which rows a run covers or what an export carries. (It IS in `viewQuery` —
+   * a grouped view paginates in display space, so the rows endpoint has to know.)
    */
   hidden: number[];
+  /**
+   * The column the grid is grouped by, null when it is not. The rows endpoint answers in DISPLAY
+   * space (headers interleaved) while it is set, so it rides `viewQuery`; `viewScope` excludes it,
+   * which is the rule that keeps "group the sheet" from changing what a run covers.
+   */
+  groupBy: number | null;
 }
 
-export const EMPTY_VIEW: GridView = { search: "", status: [], sort: null, filter: null, hidden: [] };
+export const EMPTY_VIEW: GridView = { search: "", status: [], sort: null, filter: null, hidden: [], groupBy: null };
 
 /** A saved view as the engine stores it. Sorts are an ARRAY in storage; the grid reads one today. */
 export interface SavedView {
@@ -45,6 +52,8 @@ export interface SavedView {
   search: string | null;
   /** The engine's `views.columns_json`, of which only `hidden` is read today. */
   columns?: { hidden?: number[] };
+  /** The column the view groups by, null when it does not. */
+  groupBy?: number | null;
 }
 
 /**
@@ -65,6 +74,7 @@ export function savedViewToGrid(s: SavedView): GridView {
     sort: s.sorts?.[0] ?? null,
     filter: s.filter?.children?.length ? s.filter : null,
     hidden: (s.columns?.hidden ?? []).map(Number),
+    groupBy: s.groupBy ?? null,
   };
 }
 
@@ -101,6 +111,11 @@ export function viewQuery(v: GridView): string {
   const f = usableFilter(v.filter);
   if (f) p.set("filter", JSON.stringify(f));
   if (v.sort) { p.set("sort", String(v.sort.columnId)); p.set("dir", v.sort.dir); }
+  // Grouping changes the SHAPE of the answer (headers interleave; offsets are display offsets), so
+  // the rows endpoint has to know. Everything that consumes this query besides the grid — an
+  // export, a run scope — either ignores the parameter or never sees it: viewScope below is the
+  // run's whole world, and grouping is not in it.
+  if (v.groupBy) p.set("group_by", String(v.groupBy));
   const s = p.toString();
   return s ? `&${s}` : "";
 }

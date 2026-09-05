@@ -385,6 +385,32 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
    The lift has to happen at the row. */
 .cc-tr--editing { z-index: 6; }
 
+/* The group header band. It is a row in display space — it occupies one ROW_H slot and the members
+   follow it — drawn on the header ground with the grid's hairlines so it reads as structure rather
+   than as a tall row. The count is the reason the band exists: a group of two and a group of two
+   thousand look identical without it. */
+.cc-tr--grp {
+  align-items: center;
+  gap: 10px;
+  padding: 0 var(--s-2);
+  background: var(--grid-header-bg);
+  border-top: 1px solid var(--grid-line);
+  border-bottom: 1px solid var(--grid-line);
+}
+.cc-grp__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-grp__n {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ink-mute-2);
+}
+
 /* The row number opens the record, so it has to look like it does something. It had no behaviour at
    all before and therefore no affordance; a click target with neither is one nobody finds. */
 .cc-tr .cc-grid__gutter { cursor: pointer; }

@@ -31,7 +31,7 @@ import { DATA_DIR, DB_PATH, TMP_DIR, isUnder, isUnderSyncRoot } from "./paths.ts
 import {
   addColumn, countRows, createSheet, deleteColumn, deleteColumns, deleteRow, deleteRows, deleteSheet, getCell, getSheet,
   duplicateSheet, getColumn, insertRows, listColumns, listSheets, listSiblingSheets, moveColumn,
-  moveSheet, nextRowPosition, readWindow, renameColumn, renameSheet, setCellValue,
+  moveSheet, nextRowPosition, readGroupedWindow, readWindow, renameColumn, renameSheet, setCellValue,
   duplicateColumn, setColumnDescription, setColumnSendConfig, setColumnWaterfall, setColumnWidth, setColumnColor,
   setColumnAgent, setColumnAllowedTools, setColumnAutoRun, setColumnAutoRunBudget, setColumnMaxBudget, setColumnFrozen, setColumnHttpConfig, setColumnMcpConfig, setColumnMcpServers, setColumnFirstModel, setColumnKind, setColumnModel, setColumnPrompt,
   setColumnValueType, setColumnEnumValues, setColumnFormat, unpinCell, setPrimaryColumn, setSheetKind, rowLabelColumn,
@@ -1723,6 +1723,16 @@ export function createServer(bootId: string) {
     const offset = Math.max(0, Number(req.query.offset ?? 0) | 0);
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit ?? 200) | 0));
     const sheetId = param(req, "id");
+
+    // A grouped view paginates in DISPLAY space — headers interleave with rows — so it takes its
+    // own window. Runs are untouched: viewScope never hears about grouping.
+    if (req.query.group_by) {
+      const groupColumnId = Number(req.query.group_by);
+      // listColumns already filters soft-deleted columns; the id check is the whole gate.
+      const live = listColumns(sheetId).some((c) => Number(c.id) === groupColumnId);
+      if (!live) return res.status(404).json({ error: "Column not found" });
+      return res.json(readGroupedWindow(sheetId, offset, limit, readOptionsFrom(req, sheetId), groupColumnId));
+    }
 
     const win = readWindow(sheetId, offset, limit, readOptionsFrom(req, sheetId));
 

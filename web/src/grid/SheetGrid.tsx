@@ -213,6 +213,18 @@ export function SheetGrid({
   const [colors, setColors] = useState<Record<string, string | null>>({});
   const inFlight = useRef(new Set<number>());
 
+  // ── grouping ─────────────────────────────────────────────────
+  //
+  // While a grouping is active the rows endpoint answers in DISPLAY space: headers interleave with
+  // rows, so offset N names "the Nth line on screen", not "the Nth row". Pages are deduped by
+  // display range (a header slot holds no row, so the store's own hasRow guard cannot vouch), the
+  // headers land in a side map the render reads, and each row's own VIEW position is kept so the
+  // record page opens the row the user clicked rather than the line number they clicked it at.
+  const grouped = view.groupBy != null;
+  const headerAt = useRef(new Map<number, { label: string | null; n: number }>());
+  const rowPos = useRef(new Map<number, number>());
+  const loadedPages = useRef(new Set<number>());
+
   // Subscribe to the store's structure VERSION, not to `total` — a page of rows arriving does not
   // change the row count, so a total-based snapshot would let React bail out and leave the grid on
   // skeletons forever.
@@ -407,14 +419,17 @@ export function SheetGrid({
   // and because `hasRow()` would then be true for those positions, `ensurePage` would early-return
   // forever and the new sheet's page would never arrive. Every visible cell rendered the EMPTY record, with the
   // wrong row count above it. The generation is captured before the await and compared after.
-  const generation = useRef(`${sheetId}\u0000${viewKey}`);
-  generation.current = `${sheetId}\u0000${viewKey}`;
+  const generation = useRef(`${sheetId}\u0000${viewKey}\u0000${view.groupBy ?? ""}`);
+  generation.current = `${sheetId}\u0000${viewKey}\u0000${view.groupBy ?? ""}`;
 
   /** Fetch the page containing `position`, unless it is already loaded or in flight. */
   const ensurePage = useCallback(
     async (position: number) => {
       const pageStart = Math.floor(position / PAGE) * PAGE;
-      if (cellStore.hasRow(position) || inFlight.current.has(pageStart)) return;
+      if (inFlight.current.has(pageStart)) return;
+      if (grouped) {
+        if (loadedPages.current.has(pageStart)) return;
+      } else if (cellStore.hasRow(position)) return;
       const issuedFor = generation.current;
       inFlight.current.add(pageStart);
       try {
@@ -422,8 +437,33 @@ export function SheetGrid({
         // Answering a question nobody is asking any more. Dropping it is the only safe move: the
         // reset effect has already cleared the store for whatever is on screen now.
         if (generation.current !== issuedFor) return;
-        cellStore.setTotal(win.total);
-        cellStore.ingestWindow(win.rows);
+        if (grouped) {
+          const g = win as unknown as {
+            total: number;
+            entries?: Array<
+              | { kind: "header"; label: string | null; n: number }
+              | { kind: "row"; row: { id: string; position: number; cells: Record<string, any> } }
+            >;
+          };
+          const rows: Array<{ id: string; position: number; cells: Record<string, any> }> = [];
+          (g.entries ?? []).forEach((e, i) => {
+            const dseq = pageStart + i;
+            if (e.kind === "header") {
+              headerAt.current.set(dseq, { label: e.label ?? null, n: e.n ?? 0 });
+            } else if (e.row) {
+              headerAt.current.delete(dseq);
+              rowPos.current.set(dseq, e.row.position);
+              // The row lands under its DISPLAY slot: the grid's window math is display space now.
+              rows.push({ ...e.row, position: dseq });
+            }
+          });
+          loadedPages.current.add(pageStart);
+          cellStore.setTotal(g.total);
+          cellStore.ingestWindow(rows);
+        } else {
+          cellStore.setTotal(win.total);
+          cellStore.ingestWindow(win.rows);
+        }
       } catch {
         /* a failed page must not wedge the grid — the next scroll retries it */
       } finally {
@@ -431,7 +471,7 @@ export function SheetGrid({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sheetId, viewKey],
+    [sheetId, viewKey, grouped],
   );
 
   // A view change invalidates every loaded row: position 0 of a sorted or filtered sheet is a
@@ -444,6 +484,9 @@ export function SheetGrid({
   useEffect(() => {
     if (firstView.current) { firstView.current = false; return; }
     inFlight.current.clear();
+    headerAt.current.clear();
+    rowPos.current.clear();
+    loadedPages.current.clear();
     cellStore.reset();
     scrollRef.current?.scrollTo({ top: 0 });
     void ensurePage(0);
@@ -639,6 +682,22 @@ export function SheetGrid({
       onSelect: () => onViewChange({ ...view, sort: null }),
     },
     { label: "Filter on this column…", onSelect: () => onFilterColumn?.(c) },
+    {
+      label: view.groupBy === Number(c.id) ? "Stop grouping by this" : "Group by this column",
+      // The ordering is part of the deal, not a side effect to hide: a group scattered across the
+      // sheet is not a group. The engine forces the sort too; saying it here is what keeps the
+      // menu honest about why the rows moved.
+      title:
+        view.groupBy === Number(c.id)
+          ? "Back to one row after another."
+          : "One header per value, ordered by this column, each with its size. Runs and the record page are unaffected.",
+      onSelect: () =>
+        onViewChange(
+          view.groupBy === Number(c.id)
+            ? { ...view, groupBy: null }
+            : { ...view, groupBy: Number(c.id), sort: { columnId: Number(c.id), dir: "asc" } },
+        ),
+    },
     {
       label: "Deduplicate on this column…",
       title: "Find rows that repeat the same value here",
@@ -1827,7 +1886,29 @@ export function SheetGrid({
               positioned relative to the live scroll offset rather than to absolute content space. */}
           <div className="cc-grid__body" style={{ height: win.spacerHeight }}>
             {win.indices.map((index) => {
+              const header = grouped ? headerAt.current.get(index) : undefined;
+              if (header) {
+                const hy = win.baseOffset + (index - win.firstRow) * ROW_H;
+                return (
+                  <div
+                    key={index}
+                    className="cc-tr cc-tr--grp"
+                    role="row"
+                    aria-rowindex={index + 1}
+                    style={{ transform: `translateY(${hy}px)`, height: ROW_H }}
+                  >
+                    <span className="cc-grp__label">{header.label ?? "blank"}</span>
+                    <span className="cc-grp__n mono">
+                      {header.n.toLocaleString()} {header.n === 1 ? "row" : "rows"}
+                    </span>
+                  </div>
+                );
+              }
               const row = cellStore.getRowByPosition(index);
+              // The place this row occupies in the VIEW — the number the record page reads. Under
+              // grouping the display slot counts headers, so the row's own position comes from the
+              // page that delivered it.
+              const viewPos = grouped ? (rowPos.current.get(index) ?? index) : index;
               const y = win.baseOffset + (index - win.firstRow) * ROW_H;
               return (
                 <div
@@ -1845,11 +1926,13 @@ export function SheetGrid({
                     className="cc-grid__gutter"
                     role="rowheader"
                     aria-colindex={1}
-                    onContextMenu={(e) => { if (row) ctx.open(e, `Row ${index + 1}`, rowMenu(row.id, index)); }}
+                    onContextMenu={(e) => { if (row) ctx.open(e, `Row ${index + 1}`, rowMenu(row.id, viewPos)); }}
                     /* The row NUMBER opens the record. It is the one part of a row that is not a
                        cell and had no behaviour at all, and "click the row to open it" is what a
-                       gutter looks like it should do. */
-                    onClick={() => { if (row) onOpenRecord?.(index); }}
+                       gutter looks like it should do. Under grouping the record opens by the ROW's
+                       own place in the view — the display slot counts headers, and the record page
+                       does not. */
+                    onClick={() => { if (row) onOpenRecord?.(viewPos); }}
                     title="Open this row as a record"
                   >
                     {/* The checkbox sits over the number: the number shows at rest, the box on hover or
