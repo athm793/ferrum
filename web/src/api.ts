@@ -77,6 +77,13 @@ export interface Column {
   validation?: RuleSet;
   /** Seconds a wait column holds each row for. */
   waitSeconds?: number;
+  /**
+   * Fan-out on an `ai`/`agent` column: the prompt runs once per item of `fanOutSource`'s list, in
+   * place. Results fold back as a JSON list; the cap bounds items per row and is said, not silent.
+   */
+  fanOut?: "per_item" | null;
+  fanOutSource?: string | null;
+  fanOutCap?: number | null;
   /** Runs itself when the values it depends on change, instead of waiting to be run. */
   autoRun?: boolean;
   /**

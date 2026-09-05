@@ -32,6 +32,7 @@ import { SendSettings, DEFAULT_SEND, type SendConfig } from "./SendSettings.tsx"
 import { WaterfallSettings } from "./WaterfallSettings.tsx";
 import { PromoteRule } from "./PromoteRule.tsx";
 import { PaceSettings, DEFAULT_AT_A_TIME } from "./PaceSettings.tsx";
+import { FanoutSettings, type FanoutValue } from "./FanoutSettings.tsx";
 import type { Waterfall } from "@shared/waterfall.ts";
 import { AiSetup } from "./AiSetup.tsx";
 import { RunSettings } from "./RunSettings.tsx";
@@ -164,6 +165,12 @@ export function ColumnEditor({ sheetId, column, columns, sheets, rowCount, onClo
   /** 0 = no limit. See PaceSettings. */
   const [rateLimit, setRateLimit] = useState<number>(Number(column.rateLimitPerMin ?? 0));
   const [waitSecs, setWaitSecs] = useState<number>(Number(column.waitSeconds ?? 0));
+  /** Fan-out: the prompt runs once per item of the source column's list. See FanoutSettings. */
+  const [fanout, setFanout] = useState<FanoutValue>({
+    on: column.fanOut === "per_item",
+    sourceId: column.fanOutSource ?? null,
+    cap: column.fanOutCap ?? null,
+  });
   /** Whether the agent is handed the web_search tool at all. See the Search tab. */
   const [webSearch, setWebSearch] = useState<boolean>(
     ((column as any).allowedTools ?? []).includes("web_search"),
@@ -739,6 +746,31 @@ export function ColumnEditor({ sheetId, column, columns, sheets, rowCount, onClo
       setRateLimit(previousRate);
       setWaitSecs(previousWait);
       setKindError("Could not save that.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Fan-out config. Optimistic with revert, like every settings control in this drawer. */
+  const saveFanout = async (next: FanoutValue) => {
+    const previous = fanout;
+    setFanout(next);
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/columns/${column.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fanOut: next.on ? "per_item" : null,
+          fanOutSource: next.on ? next.sourceId : null,
+          fanOutCap: next.on ? next.cap : null,
+        }),
+      }).then((r) => r.json());
+      if (res.error) { setFanout(previous); setErrors([String(res.error)]); return; }
+      onSaved();
+    } catch {
+      setFanout(previous);
+      setErrors(["Could not reach the engine to save the fan-out setting."]);
     } finally {
       setBusy(false);
     }
@@ -1464,7 +1496,7 @@ export function ColumnEditor({ sheetId, column, columns, sheets, rowCount, onClo
             <div className="cc-field" ref={promptFieldRef}>
               <span className="cc-field__label" id="cc-prompt-label">
                 What should the model put in this cell?
-                <span className="cc-field__sub">runs once per row</span>
+                <span className="cc-field__sub">{fanout.on && fanout.sourceId != null ? "runs once per item of the list column" : "runs once per row"}</span>
               </span>
               <RefField
                 className="cc-textarea"
@@ -1611,6 +1643,21 @@ export function ColumnEditor({ sheetId, column, columns, sheets, rowCount, onClo
                 )}
               </span>
             </div>
+
+            {/* ── fan-out: once per item of a list ─────────────────────────
+                How the prompt meets a list column: once per item, in place, the answers folding
+                back as a list. The candidates are the columns whose value IS a list — a text
+                column is offered nowhere, because the executor refuses scalars rather than
+                splitting prose on a guessed separator. The per-cell ceiling above applies to the
+                ACCUMULATED items, so a cap here and a cap there are the same brake. */}
+            {(kind === "ai" || kind === "agent") && (
+              <FanoutSettings
+                value={fanout}
+                columns={columns}
+                busy={busy}
+                onChange={(next) => void saveFanout(next)}
+              />
+            )}
           </>
         )}
 

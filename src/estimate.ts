@@ -86,6 +86,17 @@ export interface ColumnCost {
    * authoritative and is short by exactly the amount that matters.
    */
   unpricedSteps?: string[];
+  /**
+   * Fan-out: the sampled item distribution of the source column.
+   *
+   * `perRow`/`total` already carry the WORST case — the sampled maximum, bounded by the cap — and
+   * `bestPerRow`/`bestTotal` carry the sampled AVERAGE, the same pair a waterfall shows. These
+   * fields name the multiplier so the dialog can say "× ~12 items" instead of a bare number that
+   * nobody can check.
+   */
+  fanOutItems?: number;
+  fanOutMaxItems?: number;
+  fanOutCap?: number;
 }
 
 export interface RunCost {
@@ -180,6 +191,44 @@ function recordTokens(sheetId: string, excludeColumnId: number): number {
 
 /** The template itself is re-sent on every turn too. */
 const promptTokens = (col: Column): number => Math.ceil((col.prompt ?? "").length / CHARS_PER_TOKEN);
+
+/**
+ * The item distribution of a fan-out's source column, sampled like `recordTokens`.
+ *
+ * Returned as AVERAGE (what a run is expected to spend) and MAX (what one row can spend, before the
+ * cap) over the sampled head of the sheet. Null when no sampled row holds a list — which is also the
+ * executor's own skip condition, so a column whose source is empty prices exactly as free as it runs.
+ */
+function fanOutDistribution(sheetId: string, sourceColumnId: number): { avg: number; max: number } | null {
+  const rows = db
+    .prepare(
+      `SELECT c.value_json AS vj, c.value_text AS vt
+         FROM cells c
+         JOIN (SELECT id FROM rows WHERE sheet_id = ? ORDER BY position LIMIT ?) r ON r.id = c.row_id
+        WHERE c.column_id = ?`,
+    )
+    .all(sheetId, SAMPLE_ROWS, sourceColumnId) as any[];
+  if (rows.length === 0) return null;
+
+  let total = 0;
+  let max = 0;
+  for (const r of rows) {
+    let parsed: unknown = undefined;
+    if (r.vj != null) { try { parsed = JSON.parse(r.vj); } catch { /* degrades to skip, same as the executor */ } }
+    if (!Array.isArray(parsed)) {
+      try { parsed = typeof r.vt === "string" && r.vt.trim().startsWith("[") ? JSON.parse(r.vt) : undefined; } catch { parsed = undefined; }
+    }
+    if (Array.isArray(parsed)) {
+      total += parsed.length;
+      if (parsed.length > max) max = parsed.length;
+    }
+  }
+  if (max === 0) return null;
+  // The average is over EVERY sampled row, not only the list-bearing ones: rows whose source is
+  // empty or scalar are skipped free by the executor, and the estimate must price them at what they
+  // cost — nothing.
+  return { avg: total / rows.length, max };
+}
 
 /** What the executor will actually do: turns bounded by the column, defaulting the way it does. */
 const turnsFor = (col: Column): number => (col.maxTurns > 0 ? col.maxTurns : 6);
@@ -463,7 +512,21 @@ export async function estimateRun(
         }).perRow
       : perRow;
 
-    const colTotal = effectivePerRow * rowCount;
+    /**
+     * Fan-out multiplies the per-row figure by the row's item count, which is a DISTRIBUTION, not a
+     * number. Priced the way a waterfall is priced, for the same reason: the worst case answers
+     * "could this exceed what I am willing to spend" — the sampled maximum, bounded by the cap — and
+     * the average rides beside it so the dialog is not so pessimistic that nobody believes it.
+     * The average is over every sampled row, so rows the executor will skip price in at nothing.
+     */
+    const fanStat = col.fanOut === "per_item" && col.fanOutSource != null
+      ? fanOutDistribution(col.sheetId, Number(col.fanOutSource))
+      : null;
+    const cap = Math.max(1, Math.floor(Number(col.fanOutCap ?? 50)));
+    const worstItems = fanStat ? Math.min(cap, Math.ceil(fanStat.max)) : 1;
+    const avgItems = fanStat ? fanStat.avg : 1;
+
+    const colTotal = effectivePerRow * worstItems * rowCount;
 
     total += colTotal;
     out.push({
@@ -473,8 +536,13 @@ export async function estimateRun(
       // The model this run will actually call, not the one the column is configured with. Naming the
       // expensive model beside a cheap-model price would be two halves of two different answers.
       model: usesFirst ? firstId! : modelId,
-      perRow: effectivePerRow,
+      perRow: effectivePerRow * worstItems,
       total: colTotal,
+      bestPerRow: fanStat ? effectivePerRow * avgItems : undefined,
+      bestTotal: fanStat ? effectivePerRow * avgItems * rowCount : undefined,
+      fanOutItems: fanStat?.avg,
+      fanOutMaxItems: fanStat ? worstItems : undefined,
+      fanOutCap: fanStat ? cap : undefined,
     });
   }
 
