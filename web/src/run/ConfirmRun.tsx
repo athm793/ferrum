@@ -50,6 +50,10 @@ interface ColumnCost {
   bestTotal?: number;
   /** Steps whose price nobody declared, by name — named rather than counted as zero. */
   unpricedSteps?: string[];
+  /** Fan-out: the sampled item distribution — average, worst (cap-bounded), and the cap itself. */
+  fanOutItems?: number;
+  fanOutMaxItems?: number;
+  fanOutCap?: number;
   total: number;
   unpriced?: boolean;
   /** This column bills a third party — an HTTP endpoint or an MCP provider — at a rate we cannot see. */
@@ -238,6 +242,9 @@ export function ConfirmRun({ sheetId, scope, title, onCancel, onStarted }: Props
   const externalColumns = (cost?.columns ?? []).filter((c) => c.external);
   // Called out individually: a waterfall is the one lane whose cost is a RANGE rather than a figure.
   const waterfalls = (cost?.columns ?? []).filter((c) => c.kind === "waterfall" && (c.total > 0 || (c.unpricedSteps?.length ?? 0) > 0));
+  // Fan-out is the other lane whose cost is a range — items per row is a distribution, the cap
+  // bounds it, and both ends are sampled rather than known.
+  const fanoutColumns = (cost?.columns ?? []).filter((c) => c.fanOutItems != null && c.total > 0);
   const externalRequests = externalColumns.reduce((n, c) => n + (c.requests ?? 0), 0);
   const externalHosts = [...new Set(externalColumns.map((c) => c.host).filter(Boolean))] as string[];
 
@@ -422,6 +429,19 @@ export function ConfirmRun({ sheetId, scope, title, onCancel, onStarted }: Props
               {(c.unpricedSteps?.length ?? 0) > 0 && (
                 <> Not counted: {c.unpricedSteps!.join(", ")} — no price set, so the real total is higher.</>
               )}
+            </p>
+          ))}
+
+          {/* A fan-out's range, said out loud — same reason as the waterfall's. The figure above is
+              the sampled WORST case; the sampled average is what the run will really spend, and the
+              multiplier is named so the number is checkable instead of trusted. */}
+          {fanoutColumns.map((c) => (
+            <p key={`fo-${c.columnId}`} className="cc-modal__note">
+              <strong>{c.name}</strong> runs once per item of a list: about{" "}
+              <strong>{usd(c.bestTotal ?? 0)}</strong> at the sampled average (~
+              {Math.round((c.fanOutItems ?? 0) * 10) / 10} items a row), up to{" "}
+              <strong>{usd(c.total)}</strong> at the busiest ({c.fanOutMaxItems} items, cap{" "}
+              {c.fanOutCap}).
             </p>
           ))}
 

@@ -97,7 +97,15 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
     if (!ref.current) return;
     setRect(ref.current.getBoundingClientRect());
     setOpen(true);
-  }, []);
+    // The workbook cap is in the LABEL, so it is read when the menu opens — not when the item is
+    // clicked. The first open must show the number too; waiting for the click would show a bare
+    // label over a cap the user may have set last week.
+    if (sheet.workbookId) {
+      void fetch(`/api/workbooks/${sheet.workbookId}`).then((r) => r.json()).then((res) => {
+        setWbBudget(res.workbook?.budgetUsd ?? null);
+      }).catch(() => { /* the item still opens; its own click re-fetches */ });
+    }
+  }, [sheet.workbookId]);
 
   const rename = async () => {
     const next = name.trim();
