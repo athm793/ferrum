@@ -102,6 +102,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The gutter badge. One dot, most severe thing in the row wins: a failure is why you came, live
+   work is why the row is about to change, staleness is why it may be lying. Same hide-states as
+   the number — the checkbox replaces both, and a dot poking out beside a checkbox is clutter. */
+.cc-tr__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.cc-tr__dot--err { background: var(--status-error-solid); }
+.cc-tr__dot--live { background: var(--status-running-solid); }
+.cc-tr__dot--stale { background: var(--mark-hand); }
+
 /* ── body ───────────────────────────────────────────────────── */
 
 .cc-grid__body { position: relative; width: 100%; }
@@ -405,11 +420,15 @@ body.cc-dragging-col .cc-th__label, body.cc-dragging-col .cc-cell { cursor: grab
 .cc-grid--colselect .cc-th__check,
 .cc-th--sel .cc-th__check { opacity: 1; }
 
-/* the number steps aside when its checkbox is showing */
+/* the number steps aside when its checkbox is showing — the dot goes with it */
 .cc-grid--selectmode .cc-tr__num,
 .cc-grid__gutter:hover .cc-tr__num,
 .cc-grid--rowselect .cc-tr__num,
-.cc-tr--sel .cc-tr__num { opacity: 0; }
+.cc-tr--sel .cc-tr__num,
+.cc-grid--selectmode .cc-tr__dot,
+.cc-grid__gutter:hover .cc-tr__dot,
+.cc-grid--rowselect .cc-tr__dot,
+.cc-tr--sel .cc-tr__dot { opacity: 0; }
 
 .cc-tr--sel .cc-tr__check,
 .cc-th--sel .cc-th__check { background: var(--primary); border-color: var(--primary); color: #fff; }

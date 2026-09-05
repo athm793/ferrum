@@ -42,6 +42,30 @@ const GUTTER_W = 56;
 const PAGE = 200;
 const OVERSCAN_ROWS = 8;
 
+/**
+ * One dot for everything a row's cells are saying, in the gutter beside the number.
+ *
+ * Subscribed to the ROW, not to the grid: a delta lands mid-run and this dot moves without a
+ * refetch, because the store's cells are already the live truth. Error outranks in-flight work,
+ * which outranks staleness — a row with one failure is the row you go to, whatever else it is doing.
+ * The words land in the aria-label; the dot itself says only that there is something to see.
+ */
+function RowBadge({ rowId }: { rowId: string }) {
+  const key = useSyncExternalStore(
+    (l) => cellStore.subscribeRow(rowId, l),
+    () => cellStore.rowBadgeKey(rowId),
+  );
+  const badge = cellStore.rowBadge(rowId);
+  if (!key || !badge) return null;
+  const cls = badge.errors > 0 ? "cc-tr__dot--err" : badge.live > 0 ? "cc-tr__dot--live" : "cc-tr__dot--stale";
+  const words = [
+    badge.errors > 0 ? `${badge.errors} ${badge.errors === 1 ? "error" : "errors"}` : null,
+    badge.live > 0 ? `${badge.live} ${badge.live === 1 ? "cell" : "cells"} in flight` : null,
+    badge.stale > 0 ? `${badge.stale} ${badge.stale === 1 ? "value" : "values"} changed upstream` : null,
+  ].filter(Boolean).join(" · ");
+  return <span className={`cc-tr__dot ${cls}`} aria-label={words} title={words} />;
+}
+
 interface Props {
   sheetId: string;
   columns: Column[];
@@ -1795,6 +1819,7 @@ export function SheetGrid({
                         <IconCheck size={12} />
                       </button>
                     )}
+                    {row && <RowBadge rowId={row.id} />}
                     <span className="cc-tr__num mono">{index + 1}</span>
                   </div>
                   {row

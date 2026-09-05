@@ -97,3 +97,54 @@ test("a delta for a row outside the loaded window is ignored, not invented", asy
   assert.equal(cellStore.getCell("999", "7"), undefined);
   assert.equal(cellStore.getCell("1", "7")?.value, "old");
 });
+
+test("the gutter badge aggregates a row's own cells", () => {
+  cellStore.reset();
+  cellStore.ingestWindow([
+    {
+      id: "r1", position: 0,
+      cells: {
+        "1": { id: "r1:1", s: "done", v: "x" },
+        "2": { id: "r1:2", s: "error", e: "timeout" },
+        "3": { id: "r1:3", s: "running" },
+        "4": { id: "r1:4", s: "queued" },
+        "5": { id: "r1:5", s: "done", v: "y", stale: 1 },
+      },
+    },
+    { id: "r2", position: 1, cells: { "1": { id: "r2:1", s: "done", v: "z" } } },
+    // A quiet success and an explicit non-failure both carry no dot: not_found is a SUCCESS, and a
+    // cancelled cell was a decision, not a problem.
+    {
+      id: "r3", position: 2,
+      cells: {
+        "1": { id: "r3:1", s: "not_found" },
+        "2": { id: "r3:2", s: "cancelled" },
+      },
+    },
+  ]);
+
+  assert.deepEqual(cellStore.rowBadge("r1"), { errors: 1, live: 2, stale: 1 });
+  assert.equal(cellStore.rowBadge("r2"), null, "a quiet row carries no dot");
+  assert.equal(cellStore.rowBadge("r3"), null, "not_found is a success; cancelled is a decision");
+  assert.equal(cellStore.rowBadge("nope"), null, "an unloaded row has nothing to say");
+  assert.equal(cellStore.rowBadgeKey("r1"), "e1r2s1");
+  assert.equal(cellStore.rowBadgeKey("r2"), "");
+
+  cellStore.reset();
+  assert.equal(cellStore.rowBadge("r1"), null, "a reset clears the badges with the rows");
+});
+
+test("the badge follows a cell that fails and then recovers", async () => {
+  cellStore.reset();
+  cellStore.ingestWindow(page("old"));
+  assert.equal(cellStore.rowBadge("1"), null);
+
+  cellStore.applyDeltas([{ i: "1:7", r: 5, s: "error", e: "timeout" }]);
+  await frame();
+  assert.deepEqual(cellStore.rowBadge("1"), { errors: 1, live: 0, stale: 0 });
+
+  // The retry lands: the dot goes away without any refetch, because the live cells ARE the truth.
+  cellStore.applyDeltas([{ i: "1:7", r: 6, s: "done", v: "recovered" }]);
+  await frame();
+  assert.equal(cellStore.rowBadge("1"), null);
+});

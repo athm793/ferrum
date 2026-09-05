@@ -266,6 +266,34 @@ class CellStore {
     this._version++;
     this.notifyGlobal();
   }
+
+  // ── the gutter badge ─────────────────────────────────────────
+
+  /**
+   * What a row's own cells say, for the gutter dot.
+   *
+   * Computed from the LOADED cells, not from a server aggregate: the delta stream already keeps
+   * them live, so the badge moves the moment a cell fails or starts, with no second fetch to go
+   * stale between pages. Null when the row holds nothing worth a dot.
+   */
+  rowBadge(rowId: string): { errors: number; live: number; stale: number } | null {
+    const row = this.rows.get(rowId);
+    if (!row) return null;
+    let errors = 0, live = 0, stale = 0;
+    for (const c of Object.values(row.cells)) {
+      if (c.status === "error") errors++;
+      else if (c.status === "running" || c.status === "queued") live++;
+      if (c.stale) stale++;
+    }
+    if (errors === 0 && live === 0 && stale === 0) return null;
+    return { errors, live, stale };
+  }
+
+  /** The same answer as a string, so useSyncExternalStore can compare snapshots cheaply. */
+  rowBadgeKey(rowId: string): string {
+    const b = this.rowBadge(rowId);
+    return b ? `e${b.errors}r${b.live}s${b.stale}` : "";
+  }
 }
 
 export const cellStore = new CellStore();
