@@ -186,6 +186,15 @@ export function describeTable(sheetId: string): string {
 
   const lines: string[] = [describeEvidence(ev)];
 
+  // What the rows are, when somebody has said. This is the reader `sheets.kind` was waiting for:
+  // both proposal surfaces (the assistant and the setup panel) describe the table through this
+  // function, so a table marked "people" steers column suggestions toward names, titles and
+  // emails without a word from the user. The kind was settable for a long time before anything
+  // read it back; a setting that changes nothing is a setting that lies.
+  if (sheet.kind && sheet.kind !== "generic") {
+    lines.push(`These rows are ${sheet.kind}.`);
+  }
+
   // Ids, which the description deliberately omits — the model needs them to target set_prompt and
   // set_mode at a specific column, and they are meaningless to the user reading the reply.
   const columns = listColumns(sheetId);

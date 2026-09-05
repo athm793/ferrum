@@ -73,6 +73,16 @@ test("the description is bounded by the sample cap, not by the size of the table
   assert.ok(!text.includes("example-59.com") || domains <= 4, "the whole column is never listed");
 });
 
+test("a table's kind reaches the description; generic says nothing", () => {
+  // The reader `sheets.kind` was waiting for: both proposal surfaces describe the table through
+  // describeTable, so a marked table steers column suggestions. It was settable for a long time
+  // before anything read it back.
+  const people = createSheet("as-kind-people", null, "people");
+  const generic = createSheet("as-kind-generic");
+  assert.match(describeTable(people.id), /These rows are people\./);
+  assert.ok(!describeTable(generic.id).includes("These rows are"), "generic is the absence of an answer, not an answer");
+});
+
 test("an action naming a column that does not exist is dropped rather than offered", () => {
   // Offering it and erroring on click is worse than never offering it: the user has already decided
   // to trust the suggestion by the time it fails.
