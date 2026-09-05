@@ -2615,6 +2615,33 @@ export function createServer(bootId: string) {
       record(before.sheetId, "column.field", `Set the wait for "${before.name}"`,
         { columnId: Number(id), field: "wait_seconds", from: before.waitSeconds ?? 0, to: n });
     }
+    if (req.body?.fanOut !== undefined) {
+      const next = req.body.fanOut === "per_item" ? "per_item" : null;
+      db.prepare("UPDATE columns SET fan_out = ?, updated_at = datetime('now') WHERE id = ?").run(next, Number(id));
+      record(before.sheetId, "column.field", next ? `Run "${before.name}" once per item of its list` : `Fan-out off for "${before.name}"`,
+        { columnId: Number(id), field: "fan_out", from: before.fanOut ?? null, to: next });
+    }
+    if (req.body?.fanOutSource !== undefined) {
+      // Must name a LIVE column of this sheet. Refused rather than silently cleared: a fan-out
+      // pointed at a column that is not there would skip every row, and a skip that reads as
+      // success is the quietest failure there is.
+      const raw = req.body.fanOutSource;
+      const srcId = raw == null ? null : Number(raw);
+      if (srcId != null && !listColumns(before.sheetId).some((c) => Number(c.id) === srcId)) {
+        return res.status(422).json({ error: "The list column is not in this table." });
+      }
+      db.prepare("UPDATE columns SET fan_out_source = ?, updated_at = datetime('now') WHERE id = ?").run(srcId, Number(id));
+      record(before.sheetId, "column.field", `Set the fan-out list column for "${before.name}"`,
+        { columnId: Number(id), field: "fan_out_source", from: before.fanOutSource ?? null, to: srcId });
+    }
+    if (req.body?.fanOutCap !== undefined) {
+      const n = req.body.fanOutCap == null
+        ? null
+        : Math.max(1, Math.min(10_000, Math.floor(Number(req.body.fanOutCap) || 0)));
+      db.prepare("UPDATE columns SET fan_out_cap = ?, updated_at = datetime('now') WHERE id = ?").run(n, Number(id));
+      record(before.sheetId, "column.field", `Set the fan-out cap for "${before.name}"`,
+        { columnId: Number(id), field: "fan_out_cap", from: before.fanOutCap ?? null, to: n });
+    }
     if (req.body?.validation !== undefined) {
       const raw = req.body.validation;
       // `null` clears them. Distinguished from an absent key, which means "leave them alone" — the

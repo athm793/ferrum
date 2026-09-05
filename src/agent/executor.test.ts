@@ -215,3 +215,61 @@ test("a script accept rule never reaches the engine, because the engine cannot e
   assert.equal(out.status, "skipped");
   assert.match(String(out.errorMsg), /cannot evaluate/);
 });
+
+// ── fan-out: once per item of a list, in place ────────────────────────────────────────────────
+//
+// The wrapper's own decisions are tested without a model: what skips for free, what the cap bounds,
+// and how per-item failures aggregate. The model call itself is exercised everywhere else in this
+// file through the same `once` the wrapper calls — fan-out adds the loop, not a new lane.
+
+import { db } from "../db.ts";
+import { insertRows } from "../store.ts";
+
+function fanOutFixture(name: string, items: unknown, cap: number | null) {
+  const sheet = createSheet(name);
+  const source = addColumn(sheet.id, { name: "Titles", valueType: "json" });
+  const col = addColumn(sheet.id, { name: "Per title", kind: "ai" });
+  insertRows(sheet.id, [{ values: { [Number(source.id)]: items === null ? "" : JSON.stringify(items) } }], 0, [Number(source.id)]);
+  const rowId = Number((db.prepare("SELECT id FROM rows WHERE sheet_id = ?").get(sheet.id) as any).id);
+  if (items !== null) {
+    // The parsed blob is what `getCell` returns, and what the fan-out loop reads the list from.
+    db.prepare("UPDATE cells SET value_json = ?, value_text = NULL WHERE row_id = ? AND column_id = ?")
+      .run(JSON.stringify(items), rowId, Number(source.id));
+  }
+  db.prepare("UPDATE columns SET fan_out = 'per_item', fan_out_source = ?, fan_out_cap = ?, prompt = ?, model = ? WHERE id = ?")
+    .run(Number(source.id), cap, "Summarise this item in five words.", "openrouter/test-model", Number(col.id));
+  return { sheet, source, col, rowId, job: (): CellJob => ({ runId: `r-${name}`, sheetId: sheet.id, rowId, columnId: Number(col.id), kind: "ai", attempt: 1 }) };
+}
+
+test("fan-out skips, free, when the source column holds no list", async () => {
+  // A scalar is refused, not split: splitting a string on a guessed separator is salvage, and
+  // salvage is the author's explicit choice in a rule column, not the executor's to invent.
+  const f = fanOutFixture("fo-scalar", "just one value", 50);
+  const out = await executeCell(f.job());
+  assert.equal(out.status, "skipped");
+  assert.match(String(out.errorMsg), /holds no list/);
+  assert.equal(out.costUsd ?? 0, 0);
+});
+
+test("fan-out pointed at a column that is gone is skipped, not errored", async () => {
+  const f = fanOutFixture("fo-nosource", ["a", "b"], 50);
+  db.prepare("UPDATE columns SET fan_out_source = 999999 WHERE id = ?").run(Number(f.col.id));
+  const out = await executeCell(f.job());
+  assert.equal(out.status, "skipped");
+  assert.match(String(out.errorMsg), /no longer exists/);
+});
+
+test("fan-out bounds items by the cap and says so, and aggregates per-item failures", async () => {
+  // No provider key is configured under test, so every item fails the same way a real row would —
+  // which is exactly the aggregation under test: the failures are COUNTED, the cap is NAMED, and
+  // the cell only errors when every item failed.
+  const f = fanOutFixture("fo-cap", ["a", "b", "c"], 2);
+  const out = await executeCell(f.job());
+  assert.equal(out.status, "error", `every item failed: ${out.errorMsg ?? "(no message)"}`);
+  assert.match(String(out.errorMsg), /OpenRouter key/);
+  assert.match(String(out.note), /capped at 2 of 3 items/);
+  assert.match(String(out.note), /2 of 2 items failed/);
+  assert.equal(out.costUsd ?? 0, 0);
+  const stored = JSON.parse(String(out.valueText));
+  assert.equal(stored.length, 2, "the cap bounds the results, not just the attempts");
+});

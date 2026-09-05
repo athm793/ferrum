@@ -927,6 +927,7 @@ const MIGRATIONS: Migration[] = [
   { table: "columns", column: "json_path",        ddl: "TEXT" },
   { table: "columns", column: "fan_out",          ddl: "TEXT" },
   { table: "columns", column: "fan_out_cap",      ddl: "INTEGER NOT NULL DEFAULT 50" },
+  { table: "columns", column: "fan_out_source",   ddl: "INTEGER" },
   { table: "columns", column: "aggregate",        ddl: "TEXT" },
   { table: "columns", column: "write_target",     ddl: "TEXT" },
   // Hooks added after the first schema.

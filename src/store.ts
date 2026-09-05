@@ -465,6 +465,9 @@ function toColumn(r: any): Column {
     // "no rules" once instead of throwing in whichever of them happens to read it first.
     validation: parseRules(r.validation) ?? undefined,
     waitSeconds: Number(r.wait_seconds ?? 0),
+    fanOut: r.fan_out ?? null,
+    fanOutSource: r.fan_out_source != null ? String(r.fan_out_source) : null,
+    fanOutCap: r.fan_out_cap == null ? null : Number(r.fan_out_cap),
     conditionScriptId: r.condition_script_id != null ? String(r.condition_script_id) : undefined,
     transformScriptId: r.transform_script_id != null ? String(r.transform_script_id) : undefined,
     onUpstreamEmpty: r.on_upstream_empty, onUpstreamError: r.on_upstream_error,

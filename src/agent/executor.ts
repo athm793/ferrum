@@ -10,7 +10,7 @@
 // cannot drift between the cheap lane and the expensive one.
 
 import { db } from "../db.ts";
-import { getColumn, listColumns } from "../store.ts";
+import { getColumn, getCell, listColumns } from "../store.ts";
 import { ProviderError } from "../providers/types.ts";
 import { createOpenRouterProvider } from "../providers/openrouter.ts";
 import { getProviderKey } from "../providers/keys.ts";
@@ -21,6 +21,7 @@ import { splitModelId } from "../providers/registry.ts";
 import { modelPricePerMillion, priceTokens } from "../providers/prices.ts";
 import type { Provider } from "../providers/types.ts";
 import { executeHttpCell, valuesFor } from "../http/executeHttp.ts";
+import type { RowValues } from "../http/httpColumn.ts";
 // Circular with `executeMcp.ts`, which imports `coerce` from here — the same shape the HTTP lane
 // above already has, and ESM resolves it because neither side touches the other at module scope.
 import { executeMcpCell } from "../mcp/executeMcp.ts";
@@ -477,6 +478,16 @@ export function goodEnough(o: CellOutcome): boolean {
 export async function executeCell(job: CellJob): Promise<CellOutcome> {
   const column = getColumn(job.columnId);
   if (column?.kind === "waterfall") return executeWaterfall(job, column);
+
+  // Fan-out: the prompt runs once per item of a list column's value, IN PLACE — the same row,
+  // answered once per item. It wraps `once` (not the cheap-first ladder around it): v1 keeps the
+  // per-item loop legible, and a waterfall per item is its own feature. The schema column
+  // `columns.fan_out` existed for a long time before anything read it; a setting that changes
+  // nothing is a setting that lies.
+  if (column?.fanOut === "per_item" && (job.kind === "ai" || job.kind === "agent") && column.fanOutSource != null) {
+    return executeFanOut(job, column);
+  }
+
   const first = column?.firstModel?.trim();
   const strong = column?.model && column.model !== "auto" ? column.model : effectiveDefaultModel();
 
@@ -505,6 +516,104 @@ export async function executeCell(job: CellJob): Promise<CellOutcome> {
       : cheap.status === "not_found"
         ? `The first model found nothing. Nothing was spent. Run "${strong}" on this row to look properly.`
         : `The first model was ${cheap.confidence ?? "not sure"}. Nothing was spent. Run "${strong}" on this row to check it.`,
+  };
+}
+
+/**
+ * Fan-out: once per item of the source column's list.
+ *
+ * The list is the source column's PARSED value — a JSON or array column holding a real list. A
+ * scalar is refused, not split: `coerce` in this product is reject-never-salvage, and splitting a
+ * string on a guessed separator is salvage. Whoever wants items out of prose writes a rule column.
+ *
+ * Per item: the source column's value is substituted in the row values the prompt renders from, so
+ * the answer cache keys per item automatically — a re-run with one item changed buys one call, not
+ * all of them, and a reordered list reuses everything. The per-cell budget applies to the
+ * ACCUMULATED cost: the loop stops when the column's own ceiling is reached, and says so. The cap
+ * bounds items per row the same way the send column reports "sent 50 of 140" — bounded and SAID.
+ *
+ * Results fold back as a JSON list in the cell. Per-item failures do not sink the row: items that
+ * answered keep their values, the failures are counted in the note, and the cell errors only when
+ * EVERY item failed. The record block the model sees still carries the whole list — the
+ * instruction names the item; the context shows where it came from.
+ */
+async function executeFanOut(job: CellJob, column: Column): Promise<CellOutcome> {
+  const source = getColumn(column.fanOutSource!);
+  if (!source) {
+    return { status: "skipped", errorMsg: "The column this fan-out reads its list from no longer exists." };
+  }
+  const parsed = getCell(Number(job.rowId), Number(source.id))?.value;
+  const items = Array.isArray(parsed) ? parsed : [];
+  if (items.length === 0) {
+    return {
+      status: "skipped",
+      errorMsg: `/${source.name} holds no list for this row. Fan-out runs once per item of a list value.`,
+    };
+  }
+
+  const cap = Math.max(1, Math.floor(Number(column.fanOutCap ?? 50)));
+  const base = valuesFor(job.sheetId, job.rowId, job.columnId);
+  const sourceKeys = [String(source.id), source.name.trim().toLowerCase()];
+  const budget = Number(column.maxBudgetUsd ?? 0);
+
+  const results: unknown[] = [];
+  let costUsd = 0;
+  let failed = 0;
+  let skipped = 0;
+  let firstError: string | null = null;
+  let firstSkip: string | null = null;
+  let stoppedForBudget = false;
+  const bounded = items.slice(0, cap);
+
+  for (const item of bounded) {
+    if (budget > 0 && costUsd >= budget) {
+      stoppedForBudget = true;
+      break;
+    }
+    const itemValues: RowValues = new Map(base);
+    const text = item == null ? "" : typeof item === "string" ? item : JSON.stringify(item);
+    for (const k of sourceKeys) itemValues.set(k, text);
+    const out = await once(job, undefined, undefined, itemValues);
+    costUsd += Number(out.costUsd ?? 0);
+    if (out.status === "done" || out.status === "not_found") {
+      results.push(out.valueText ?? null);
+    } else if (out.status === "skipped") {
+      skipped++;
+      firstSkip ??= out.errorMsg ?? "the item was skipped";
+      results.push(null);
+    } else {
+      failed++;
+      firstError ??= out.errorMsg ?? `failed (${out.errorType ?? "unknown"})`;
+      results.push(null);
+    }
+  }
+
+  // Every item skipped is the row skipping, free — not an error. The parent run would have skipped
+  // the cell for the same reason (an empty list, an unconfigured column), so the cell says what the
+  // first item said instead of manufacturing a failure nothing spent money on.
+  if (skipped === bounded.length && failed === 0) {
+    return {
+      status: "skipped",
+      errorMsg: `Every item was skipped: ${firstSkip ?? "nothing to run"}`,
+      costUsd,
+      ...(items.length > cap ? { note: `capped at ${cap} of ${items.length} items` } : {}),
+    };
+  }
+
+  const notes: string[] = [];
+  if (items.length > cap) notes.push(`capped at ${cap} of ${items.length} items`);
+  if (stoppedForBudget) notes.push(`stopped at $${costUsd.toFixed(2)} of the $${budget.toFixed(2)} per-cell cap`);
+  if (failed > 0) notes.push(`${failed} of ${bounded.length} items failed`);
+  if (skipped > 0) notes.push(`${skipped} of ${bounded.length} items skipped`);
+
+  const allFailed = failed === bounded.length && bounded.length > 0;
+  return {
+    status: allFailed ? "error" : "done",
+    ...(allFailed ? { errorType: "unknown" as const, errorMsg: firstError ?? "Every item failed." } : {}),
+    value: allFailed ? null : results,
+    valueText: JSON.stringify(results),
+    costUsd,
+    ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
   };
 }
 
@@ -693,9 +802,14 @@ function stepAsColumn(base: Column, step: WaterfallStep): Column {
   return { ...base, ...(step.config as Partial<Column>), kind: step.kind } as Column;
 }
 
-async function once(job: CellJob, modelOverride?: string, columnOverride?: Column): Promise<CellOutcome> {
+async function once(
+  job: CellJob,
+  modelOverride?: string,
+  columnOverride?: Column,
+  valuesOverride?: RowValues,
+): Promise<CellOutcome> {
   let sent: string | null = null;
-  const out = await runCell(job, (t) => { sent = t; }, modelOverride, columnOverride);
+  const out = await runCell(job, (t) => { sent = t; }, modelOverride, columnOverride, valuesOverride);
   // An early return — the HTTP lane, a blank prompt, a missing reference — happens before a prompt
   // exists, and gets nothing rather than an empty string that would render as a blank fold.
   return sent == null ? out : { ...out, renderedPrompt: sent };
@@ -715,6 +829,14 @@ async function runCell(
    * implementation. `job.kind` is overridden alongside it, since the lane fork below reads that.
    */
   columnOverride?: Column,
+  /**
+   * Row values to render the prompt from, instead of the row's own cells.
+   *
+   * How fan-out feeds one item at a time through the same prompt: the substitute values carry the
+   * source column's ITEM, everything else stays the row's own. Because the cache key hashes the
+   * rendered task, per-item substitution makes the answer cache per-item for free.
+   */
+  valuesOverride?: RowValues,
 ): Promise<CellOutcome> {
   const started = Date.now();
   const column = columnOverride ?? getColumn(job.columnId);
@@ -775,7 +897,7 @@ async function runCell(
   // website does not fail — the model cannot say "I would have to look this up", so it produces a
   // confident wrong answer, and it charges for it, on every affected row. A skip is free and says
   // exactly which column was empty.
-  const rowValues = valuesFor(job.sheetId, job.rowId, job.columnId);
+  const rowValues = valuesOverride ?? valuesFor(job.sheetId, job.rowId, job.columnId);
   const missing = missingRequired([instruction], rowValues);
   if (missing.length > 0) {
     const names = missing

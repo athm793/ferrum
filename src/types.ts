@@ -200,6 +200,21 @@ export interface Column {
   /** Seconds a `wait` column holds each row for. See the wait lane in executor.ts. */
   waitSeconds?: number;
 
+  /**
+   * Fan-out: run the prompt once per item of the source column's list, IN PLACE.
+   *
+   * NOT the `send` column's per-item, which explodes a list into rows of another table — this is
+   * the same row, answered once per item. ai/agent lanes only.
+   */
+  fanOut?: "per_item" | null;
+  /** The column the list is read from. Required when fanOut is "per_item". */
+  fanOutSource?: string | null;
+  /**
+   * Per-row ceiling on items. Default 50 when the lane runs; the excess is skipped and SAID, the
+   * way the send column reports "sent 50 of 140".
+   */
+  fanOutCap?: number | null;
+
   /** Generated run condition. When it returns false the cell is `skipped` and nothing is spent. */
   conditionScriptId?: string;
   /** Runs itself when upstream values change, instead of waiting to be run. */
