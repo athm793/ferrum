@@ -74,6 +74,19 @@
 
 .cc-th--add { justify-content: center; padding: 0; }
 
+/* The hidden-columns chip at the end of the header. Reads as a header cell, not a toolbar button:
+   it stands where the missing columns are. The count is the label; the names are on hover; the
+   click opens the menu that brings them back. */
+.cc-th--hiddenchip {
+  justify-content: center;
+  padding: 0;
+  color: var(--ink-mute-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.cc-th--hiddenchip:hover { color: var(--primary); background: var(--grid-header-bg); }
+
 /* ── gutter ─────────────────────────────────────────────────── */
 
 .cc-grid__gutter {

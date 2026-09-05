@@ -33,12 +33,14 @@ interface Props {
   openedWith?: number | null;
 }
 
-/** Same shape on both sides of the comparison, so key order cannot make an identical view look edited. */
+/** Same shape on both sides of the comparison, so key order cannot make an identical view look edited.
+ *  Hidden ids sort before comparing, because hiding is a SET — {3,7} and {7,3} are one state. */
 const fingerprint = (v: GridView) =>
   JSON.stringify({
     filter: usableFilter(v.filter),
     sort: v.sort,
     search: v.search.trim(),
+    hidden: [...v.hidden].sort((a, b) => a - b),
   });
 
 export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onSetDefaultView, openedWith }: Props) {
@@ -92,6 +94,7 @@ export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onS
         filter: usableFilter(view.filter) ?? { conj: "and", children: [] },
         sorts: view.sort ? [view.sort] : [],
         search: view.search.trim() || null,
+        columns: { hidden: view.hidden },
       };
       const res = await fetch(`/api/sheets/${sheetId}/views`, {
         method: "POST",
@@ -126,6 +129,7 @@ export function ViewBar({ sheetId, view, onChange, onMutated, defaultViewId, onS
           filter: usableFilter(view.filter) ?? { conj: "and", children: [] },
           sorts: view.sort ? [view.sort] : [],
           search: view.search.trim() || null,
+          columns: { hidden: view.hidden },
         }),
       });
       const body = await res.json().catch(() => null);

@@ -24,9 +24,17 @@ export interface GridView {
   sort: { columnId: number; dir: "asc" | "desc" } | null;
   /** The filter bar's conditions. Null when nothing is built. */
   filter: FilterGroup | null;
+  /**
+   * Column ids the grid does NOT render, as numbers to match the engine's
+   * `views.columns_json.hidden` and `sort.columnId` beside it.
+   *
+   * Presentation only, and deliberately kept out of `viewQuery` and `viewScope`: hiding a column
+   * changes what is on screen, never which rows a run covers or what an export carries.
+   */
+  hidden: number[];
 }
 
-export const EMPTY_VIEW: GridView = { search: "", status: [], sort: null, filter: null };
+export const EMPTY_VIEW: GridView = { search: "", status: [], sort: null, filter: null, hidden: [] };
 
 /** A saved view as the engine stores it. Sorts are an ARRAY in storage; the grid reads one today. */
 export interface SavedView {
@@ -35,6 +43,8 @@ export interface SavedView {
   filter: FilterGroup;
   sorts: Array<{ columnId: number; dir: "asc" | "desc" }>;
   search: string | null;
+  /** The engine's `views.columns_json`, of which only `hidden` is read today. */
+  columns?: { hidden?: number[] };
 }
 
 /**
@@ -54,6 +64,7 @@ export function savedViewToGrid(s: SavedView): GridView {
     status: [],
     sort: s.sorts?.[0] ?? null,
     filter: s.filter?.children?.length ? s.filter : null,
+    hidden: (s.columns?.hidden ?? []).map(Number),
   };
 }
 

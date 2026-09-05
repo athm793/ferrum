@@ -111,6 +111,15 @@ interface Props {
   /** The column that names a row, and the way to change it. */
   primaryColumnId?: string | null;
   onSetPrimaryColumn?: (columnId: string | null) => void;
+  /**
+   * Take a column out of the grid, as a VIEW change: it never touches what runs, filters or
+   * exports, and the header's hidden-columns chip is the way back.
+   */
+  onHideColumn?: (column: Column) => void;
+  /** The columns the current view is hiding, so the header can offer them back by name. */
+  hiddenColumns?: Column[];
+  onUnhideColumn?: (column: Column) => void;
+  onUnhideAllColumns?: () => void;
   /** Put a column at a new place in the order. `toIndex` is a position in the visible order. */
   onMoveColumn?: (column: Column, toIndex: number) => void;
   /** Add one empty row at the end of the sheet. */
@@ -166,6 +175,7 @@ export function SheetGrid({
   view, onViewChange, onRenameColumn, onDeleteColumn, onRunCell, onRunRow, onDeleteRow,
   onRunScope, onRunRange, onExpandJson, onSendToTable, onRefreshDerived, onPinColumn, onMoveColumn,
   primaryColumnId, onSetPrimaryColumn,
+  onHideColumn, hiddenColumns, onUnhideColumn, onUnhideAllColumns,
   onAddRow, onInsertColumn, onDuplicateColumn, onSaveTemplate, onDescribeColumn, onFilterColumn, onDedupeColumn,
   onNotice, onOverrideCell, onRowsAdded, onOpenRecord, onDeleteRows, onDeleteColumns, onSelectAllRows, selectMode,
 }: Props) {
@@ -699,7 +709,27 @@ export function SheetGrid({
         onSetPrimaryColumn?.(String(c.id) === String(primaryColumnId) ? null : String(c.id)),
     },
     { separator: true },
+    {
+      label: "Hide this column",
+      // The grid must keep one column to its name. The "why" is the whole point: a silently
+      // disabled item reads as broken, and "hide the last column" reads as a reasonable ask.
+      disabled: columns.length <= 1,
+      title: columns.length <= 1
+        ? "This is the only column showing — hide another one first."
+        : "Off the grid, still in the table. It keeps running, filtering and exporting; the chip at the end of the header brings it back.",
+      onSelect: () => onHideColumn?.(c),
+    },
     { label: "Delete column", danger: true, onSelect: () => onDeleteColumn?.(c) },
+  ];
+
+  /** What the hidden-columns chip at the end of the header offers. */
+  const hiddenMenu = (): MenuItem[] => [
+    ...(hiddenColumns ?? []).map((c) => ({
+      label: `Show “${c.name}”`,
+      onSelect: () => onUnhideColumn?.(c),
+    } as MenuItem)),
+    { separator: true },
+    { label: "Show all", onSelect: () => onUnhideAllColumns?.() },
   ];
 
   const cellMenu = (rowId: string, c: Column, value: string | null): MenuItem[] => [
@@ -1742,7 +1772,25 @@ export function SheetGrid({
                 </div>
               );
             })}
-            <div className="cc-th cc-th--add" style={{ width: 40 }} role="columnheader" aria-colindex={columns.length + 2}>
+            {/* Where hidden columns came back from. At the END of the header — exactly where the
+                missing columns are — with the count as the label and the names on hover, so "the
+                sheet is shorter than it was" has an answer on screen. */}
+            {(hiddenColumns?.length ?? 0) > 0 && (
+              <button
+                type="button"
+                className="cc-th cc-th--hiddenchip"
+                style={{ width: 44 }}
+                role="columnheader"
+                aria-colindex={columns.length + 2}
+                aria-label={`${hiddenColumns!.length} hidden ${hiddenColumns!.length === 1 ? "column" : "columns"}`}
+                title={`Hidden: ${hiddenColumns!.map((c) => c.name).join(", ")}`}
+                aria-haspopup="menu"
+                onClick={(e) => ctx.open(e, "Hidden columns", hiddenMenu())}
+              >
+                +{hiddenColumns!.length}
+              </button>
+            )}
+            <div className="cc-th cc-th--add" style={{ width: 40 }} role="columnheader" aria-colindex={columns.length + 3}>
               <button className="hk-icon-btn" onClick={onAddColumn} aria-label="Add column" title="Add column">
                 <IconPlus />
               </button>

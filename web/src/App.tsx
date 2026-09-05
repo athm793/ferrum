@@ -234,6 +234,12 @@ export function App() {
 
   // ── how the grid is being looked at ───────────────────────────
   const [view, setView] = useState<GridView>(EMPTY_VIEW);
+  // The grid renders the view's columns; the record page renders the TABLE's. Hiding is a view
+  // change, so a hidden column still shows in the full record — that page exists to show a whole
+  // row, and its filter bar and run scopes keep working on hidden columns by the same rule.
+  const hiddenIds = new Set(view.hidden);
+  const gridColumns = useMemo(() => columns.filter((c) => !hiddenIds.has(Number(c.id))), [columns, view.hidden]);
+  const hiddenColumnList = useMemo(() => columns.filter((c) => hiddenIds.has(Number(c.id))), [columns, view.hidden]);
   // The input's text is separate from the view's search term. Typing re-renders on every keystroke;
   // the VIEW only moves after a pause, because each change is a fresh server-side scan of every cell
   // in the sheet. Bound directly, "acme" would have run five of them.
@@ -1667,7 +1673,11 @@ export function App() {
           ) : (
           <SheetGrid
             sheetId={sheet.id}
-            columns={columns}
+            columns={gridColumns}
+            hiddenColumns={hiddenColumnList}
+            onHideColumn={(c) => setView((v) => ({ ...v, hidden: [...v.hidden, Number(c.id)] }))}
+            onUnhideColumn={(c) => setView((v) => ({ ...v, hidden: v.hidden.filter((id) => id !== Number(c.id)) }))}
+            onUnhideAllColumns={() => setView((v) => ({ ...v, hidden: [] }))}
             onAddColumn={addColumn}
             onOpenCell={(cellId, rect) => openCellPanel({ cellId, rect })}
             onEditColumn={(c) => openColumnEditor(c)}
