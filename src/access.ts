@@ -269,6 +269,12 @@ export function neededFor(method: string, path: string): Capability {
   // Starting a run is a POST to a SHEET, not to /api/runs — the scope belongs to the table. That is
   // the one path where the method alone would get it wrong, so it is named rather than inferred.
   if (!reading && /^\/api\/sheets\/[^/]+\/runs$/.test(path)) return "spend";
+  // A workbook's spending ceiling bounds what EVERYONE on the instance can spend in that project, so
+  // setting it is a settings-grade decision, not an ordinary edit — the roles list already puts
+  // "budgets" on the admin rung. Named here rather than in the prefix table for the same reason the
+  // run route above is: the table matches literal prefixes and cannot name a path with an id in the
+  // middle of it.
+  if (!reading && /^\/api\/workbooks\/[^/]+\/budget$/.test(path)) return "settings";
   // An unnamed write falls to `write`, NOT to `settings`, and the choice is deliberate rather than
   // lazy. Nearly every route in this app is a member doing their job — cells, columns, tables,
   // views, imports, folders, relations, sources, scripts — so a `settings` default would lock the

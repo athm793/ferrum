@@ -163,6 +163,16 @@ test("starting a run is a spend, wherever the route lives", () => {
   assert.equal(neededFor("PATCH", "/api/schedules/3"), "spend");
 });
 
+test("setting a workbook's spending ceiling is admin-grade, and reading it is not", () => {
+  // The ceiling bounds what EVERYONE spends in the project, which is why it is settings rather than
+  // write — but it lives on a workbook path, so the rule is named by regex like the run route, not
+  // by a prefix that would drag rename and create up to admin with it.
+  assert.equal(neededFor("PATCH", "/api/workbooks/wb-1/budget"), "settings");
+  assert.equal(neededFor("PATCH", "/api/workbooks/wb-1"), "write", "rename stays an ordinary edit");
+  assert.equal(neededFor("POST", "/api/workbooks"), "write", "so does making a workbook");
+  assert.equal(neededFor("GET", "/api/workbooks/wb-1/budget"), "read");
+});
+
 test("stopping a run needs no more than being able to see it", () => {
   // A viewer classified as write-forbidden could WATCH a run burning money and not be allowed to
   // stop it. Cancelling destroys nothing; its best case is somebody catching a mistake.

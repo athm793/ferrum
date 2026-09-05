@@ -19,6 +19,8 @@ export interface Workbook {
   description: string | null;
   isTemplate: boolean;
   publicToken: string | null;
+  /** The workbook's spending ceiling in USD, enforced by `budgetExceeded` over every table in it. Null = no cap. */
+  budgetUsd: number | null;
   tableCount: number;
   createdAt: string;
   updatedAt: string;
@@ -28,6 +30,7 @@ function toWorkbook(r: any): Workbook {
   return {
     id: r.id, name: r.name, description: r.description ?? null,
     isTemplate: !!r.is_template, publicToken: r.public_token ?? null,
+    budgetUsd: r.budget_usd == null ? null : Number(r.budget_usd),
     tableCount: Number(r.table_count ?? 0),
     createdAt: r.created_at, updatedAt: r.updated_at,
   };

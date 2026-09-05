@@ -838,3 +838,44 @@ test("a delivery to a switched-off source is recorded, and still answers exactly
   assert.ok(first.note?.includes("switched off"), first.note ?? "");
   assert.ok(first.body.includes("enterprise"), "the body they sent is kept");
 });
+
+test("the workbook budget cap can be set, and only by an admin", async () => {
+  // budgetExceeded enforced workbooks.budget_usd over every table in the workbook, but its only
+  // writer copied it from a source workbook that could never have had one — a cap the code behaved
+  // as if it existed, that nothing on this instance could set. Budgets are admin-grade: they bound
+  // what everyone on the instance spends in the project.
+  const ctx = claimed("wbudget");
+  const admin = createPerson({ email: `admin-wbudget@ferrum.test`, password: "a-long-enough-password", role: "admin" });
+  const wb: ReturnType<typeof createWorkbook> = createWorkbook("ZZ budgeted");
+  const patch = (cookie: string, budgetUsd: number | null): Promise<{ status: number; body: any }> =>
+    fetch(`http://127.0.0.1:${port}/api/workbooks/${wb.id}/budget`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+        Origin: `http://127.0.0.1:${port}`,
+      },
+      body: JSON.stringify({ budgetUsd }),
+    }).then((r) => r.json().then((body) => ({ status: r.status, body })));
+  const adminCookie = `${SESSION_COOKIE}=${startSession(admin.id)}`;
+  try {
+    const asMember = await patch(ctx.cookie, 200);
+    assert.equal(asMember.status, 403, "a member cannot set the ceiling everyone spends under");
+
+    const set = await patch(adminCookie, 199.999);
+    assert.equal(set.status, 200);
+    assert.equal(set.body.workbook.budgetUsd, 200, "stored rounded to cents");
+
+    const bad = await patch(adminCookie, -5);
+    assert.equal(bad.status, 422, "a negative cap is refused, not coerced");
+
+    const junk = await patch(adminCookie, "lots" as unknown as number);
+    assert.equal(junk.status, 422, "a non-number is refused rather than Number()-ed into one");
+
+    const clear = await patch(adminCookie, null);
+    assert.equal(clear.status, 200);
+    assert.equal(clear.body.workbook.budgetUsd, null, "null clears the cap");
+  } finally {
+    ctx.release();
+  }
+});

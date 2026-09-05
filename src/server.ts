@@ -2014,6 +2014,34 @@ export function createServer(bootId: string) {
     res.json({ workbook: getWorkbook(id) });
   }));
 
+  /**
+   * The workbook's spending ceiling.
+   *
+   * `budgetExceeded` has enforced `workbooks.budget_usd` over every table in the workbook — trashed
+   * ones included — for a long time, but nothing could SET it: its only writer copied it from a
+   * source workbook that could never have had one either, so the cap the code described did not
+   * exist for any workbook made here. Setting it is admin-grade, decided in `neededFor` rather than
+   * the prefix table, which cannot match a path with an id in the middle.
+   *
+   * Strict on shape: a number or null, nothing else. A negative cap would pause every run on the
+   * workbook forever, and a string that Number() quietly turned into a value is how a typo becomes
+   * a limit nobody meant. Undefined changes nothing; null clears the cap.
+   */
+  app.patch("/api/workbooks/:id/budget", wrap((req, res) => {
+    const id = param(req, "id");
+    const wb = getWorkbook(id);
+    if (!wb) return res.status(404).json({ error: "Workbook not found" });
+    const raw = (req.body ?? {}).budgetUsd;
+    if (raw !== undefined && raw !== null && (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0)) {
+      return res.status(422).json({ error: "A budget is a dollar amount of zero or more, or null for no cap." });
+    }
+    if (raw !== undefined) {
+      const next = raw === null ? null : Math.round(raw * 100) / 100;
+      db.prepare("UPDATE workbooks SET budget_usd = ?, updated_at = datetime('now') WHERE id = ?").run(next, id);
+    }
+    res.json({ workbook: getWorkbook(id) });
+  }));
+
   /** Archive a workbook. Its tables go with it — they have no meaning outside the file. */
   app.post("/api/workbooks/:id/trash", wrap((req, res) => {
     const id = param(req, "id");
