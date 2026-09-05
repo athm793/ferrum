@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net";
 import { db } from "./db.ts";
 import { addColumn, createSheet, getColumn, insertRows } from "./store.ts";
 import { createServer } from "./server.ts";
+import { DEFAULT_HTTP, normalizeHttpConfig } from "./http/httpColumn.ts";
 import { saveScript } from "./scripts.ts";
 import { undo } from "./undo.ts";
 import { createWorkbook, trashTable } from "./views.ts";
@@ -745,6 +746,67 @@ test("health tells an anonymous caller that it is up, and nothing else", async (
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { Cookie: ctx.cookie } });
     const body = await res.json() as any;
     assert.ok(body.db?.path, "someone signed in still gets the whole thing");
+  } finally {
+    ctx.release();
+  }
+});
+
+test("the key-usage check names the column that really refers to the key", async () => {
+  // The route's SELECT omitted c.http_config while its filter read it, so `r.http_config` was
+  // undefined for every row and EVERY key answered "no column refers to it" — including one in use
+  // everywhere. A safety check that always returns the reassuring answer is worse than none.
+  const ctx = claimed("keyusage");
+  try {
+    const { sheet } = fixture("keyusage");
+    const http = addColumn(sheet.id, { name: "Enrich", kind: "http" });
+    db.prepare("UPDATE columns SET http_config = ? WHERE id = ?").run(
+      JSON.stringify(normalizeHttpConfig({
+        ...DEFAULT_HTTP,
+        url: "https://api.example.com/v1",
+        headers: [{ name: "Authorization", value: "Bearer {{secret:Keyusage Key}}" }],
+      })),
+      Number(http.id),
+    );
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/api/secrets/${encodeURIComponent("keyusage key")}/usage`,
+      { headers: { Cookie: ctx.cookie } },
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json() as any;
+    assert.equal(body.used.length, 1, "the one column that refers to it is named");
+    assert.equal(body.used[0].columnId, Number(http.id));
+    assert.equal(body.used[0].column, "Enrich");
+  } finally {
+    ctx.release();
+  }
+});
+
+test("the inside of a restricted workbook is a 404 to someone without a grant", async () => {
+  // GET /api/workspace?workbook=<id> filtered every OTHER branch of the route through visible(),
+  // and answered the inside branch to anyone holding the id — name, tables and row counts. The id
+  // is the one the app itself writes into the address bar, so a link outlives a restriction.
+  const ctx = claimed("crumb");
+  try {
+    const wb = createWorkbook("ZZ crumb-restricted");
+    const sheet = createSheet("ZZ crumb-secret", wb.id);
+    addColumn(sheet.id, { name: "Deal", kind: "static" });
+    db.prepare("UPDATE workbooks SET restricted = 1 WHERE id = ?").run(wb.id);
+
+    const denied = await fetch(`http://127.0.0.1:${port}/api/workspace?workbook=${wb.id}`, {
+      headers: { Cookie: ctx.cookie },
+    });
+    assert.equal(denied.status, 404, "the same answer as a workbook that does not exist");
+    assert.equal((await denied.json() as any).error, "Workbook not found");
+
+    db.prepare("INSERT INTO workbook_grants (workbook_id, user_id) VALUES (?, ?)").run(wb.id, ctx.member.id);
+    const granted = await fetch(`http://127.0.0.1:${port}/api/workspace?workbook=${wb.id}`, {
+      headers: { Cookie: ctx.cookie },
+    });
+    assert.equal(granted.status, 200);
+    const body = await granted.json() as any;
+    assert.ok(Array.isArray(body.entries) && body.entries.some((e: any) => e.name === "ZZ crumb-secret"),
+      "a granted person still sees the tables inside");
   } finally {
     ctx.release();
   }

@@ -1917,6 +1917,10 @@ export function createServer(bootId: string) {
     if (workbookId) {
       const wb = getWorkbook(workbookId);
       if (!wb) return res.status(404).json({ error: "Workbook not found" });
+      // The inside of a workbook answers to the same rule as the lists that link to it: a restricted
+      // workbook this person is not granted is a 404 here too, with the SAME body as the
+      // missing-workbook answer above, so the route stays a non-oracle for which restricted ids exist.
+      if (hiddenWorkbooks(req).has(String(wb.id))) return res.status(404).json({ error: "Workbook not found" });
       const folder = (db.prepare("SELECT folder_id FROM workbooks WHERE id = ?").get(workbookId) as any)?.folder_id ?? null;
       return res.json({
         entries: listWorkbook(workbookId),
@@ -3858,7 +3862,7 @@ export function createServer(bootId: string) {
     const name = decodeURIComponent(param(req, "name")).trim().toLowerCase();
     const rows = db
       .prepare(
-        `SELECT c.id, c.name, c.sheet_id, s.name AS sheet_name
+        `SELECT c.id, c.name, c.sheet_id, s.name AS sheet_name, c.http_config
            FROM columns c JOIN sheets s ON s.id = c.sheet_id
           WHERE c.deleted_at IS NULL AND s.deleted_at IS NULL AND c.http_config IS NOT NULL`,
       )
