@@ -82,6 +82,10 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [budgeting, setBudgeting] = useState(false);
   const [budget, setBudget] = useState("");
+  /** Which limit the open dialog edits. The workbook's cap sits ABOVE the table's, so it is named
+   *  first in the menu and its dialog says what it counts — every table, trashed ones included. */
+  const [budgetTarget, setBudgetTarget] = useState<"sheet" | "workbook">("sheet");
+  const [wbBudget, setWbBudget] = useState<number | null>(null);
   const [kinding, setKinding] = useState(false);
   const [kind, setKind] = useState<SheetKind>("generic");
   const [busy, setBusy] = useState(false);
@@ -116,18 +120,38 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/sheets/${sheet.id}`, {
+      const url = budgetTarget === "workbook" && sheet.workbookId
+        ? `/api/workbooks/${sheet.workbookId}/budget`
+        : `/api/sheets/${sheet.id}`;
+      const res = await fetch(url, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ budgetUsd: value }),
       }).then((r) => r.json());
       if (res.error) { setError(res.error); return; }
-      onBudgetSet?.(res.sheet?.budgetUsd ?? null);
+      if (budgetTarget === "workbook") setWbBudget(res.workbook?.budgetUsd ?? null);
+      else onBudgetSet?.(res.sheet?.budgetUsd ?? null);
       setBudgeting(false);
     } catch {
       setError("Could not reach the engine to save the limit.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** The current workbook cap, for the menu label — read when the menu opens, like the sheet's own. */
+  const openWorkbookBudget = async () => {
+    if (!sheet.workbookId) return;
+    setOpen(false);
+    try {
+      const res = await fetch(`/api/workbooks/${sheet.workbookId}`).then((r) => r.json());
+      const current = res.workbook?.budgetUsd ?? null;
+      setWbBudget(current);
+      setBudget(current == null ? "" : String(current));
+      setBudgetTarget("workbook");
+      setBudgeting(true);
+    } catch {
+      setError("Could not reach the engine.");
     }
   };
 
@@ -220,12 +244,20 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
               Deduplication…
             </button>
           )}
+          {/* The workbook's cap sits above the table's, so it is named first — a table limit inside
+              a workbook limit is the nesting, and the labels are where the nesting is readable. Same
+              rule as the table's: the value is in the label, not behind the form. */}
+          {sheet.workbookId && (
+            <button className="cc-menu2__item" onClick={() => void openWorkbookBudget()}>
+              Workbook spending limit{wbBudget != null ? ` · ${wbBudget}` : ""}
+            </button>
+          )}
           {/* The limit is in the label, not hidden behind the dialog. A cap you cannot see without
               opening a form is a cap you forget you set — and then spend an afternoon wondering why
               runs keep pausing. */}
           <button
             className="cc-menu2__item"
-            onClick={() => { setOpen(false); setBudget(sheet.budgetUsd == null ? "" : String(sheet.budgetUsd)); setBudgeting(true); }}
+            onClick={() => { setOpen(false); setBudgetTarget("sheet"); setBudget(sheet.budgetUsd == null ? "" : String(sheet.budgetUsd)); setBudgeting(true); }}
           >
             Spending limit{sheet.budgetUsd != null ? ` · ${sheet.budgetUsd}` : ""}
           </button>
@@ -357,14 +389,20 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
       <Modal
         open={budgeting}
         onClose={() => setBudgeting(false)}
-        title="Spending limit for this table"
-        footNote={error ?? "Counts every run ever made against this table."}
+        title={budgetTarget === "workbook" ? "Spending limit for this workbook" : "Spending limit for this table"}
+        footNote={error ?? (budgetTarget === "workbook"
+          ? "Counts every run against every table in this workbook — trashed tables included."
+          : "Counts every run ever made against this table.")}
         footer={
           <>
             <button className="cc-btn" onClick={() => setBudgeting(false)}>Cancel</button>
             {/* Clearing is its own button rather than "save an empty box", because emptying a field
                 and pressing Save reads as cancelling, not as removing the limit. */}
-            <button className="cc-btn" onClick={() => void saveBudget(null)} disabled={busy || sheet.budgetUsd == null}>
+            <button
+              className="cc-btn"
+              onClick={() => void saveBudget(null)}
+              disabled={busy || (budgetTarget === "workbook" ? wbBudget == null : sheet.budgetUsd == null)}
+            >
               Remove limit
             </button>
             <button className="cc-btn cc-btn--primary" onClick={() => void saveBudget(Number(budget))} disabled={busy || !budget.trim()}>
@@ -391,9 +429,14 @@ export function SheetMenu({ sheet, view, visibleRows, onRenamed, onTrashed, onBu
             onKeyDown={(e) => { if (e.key === "Enter" && budget.trim()) void saveBudget(Number(budget)); }}
           />
           <span className="cc-field__hint">
-            A run that reaches this <strong>pauses</strong> rather than failing — the rows already
-            done keep their values, and you can raise the limit and carry on. Script columns cost
-            nothing and are never counted.
+            {budgetTarget === "workbook"
+              ? <>A workbook is a project, and this is the “this project may cost $200” ceiling: every
+                 table in it counts, trashed ones included — money spent on a deleted table was still
+                 spent. A run that reaches it <strong>pauses</strong> rather than failing. Each
+                 table's own limit still bites first; this one catches what they miss.</>
+              : <>A run that reaches this <strong>pauses</strong> rather than failing — the rows already
+                 done keep their values, and you can raise the limit and carry on. Script columns cost
+                 nothing and are never counted.</>}
           </span>
         </label>
       </Modal>
