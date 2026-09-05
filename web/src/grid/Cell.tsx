@@ -11,6 +11,7 @@ import { memo, useCallback, useEffect, useRef, useSyncExternalStore } from "reac
 import { cellStore, clock, type CellRecord } from "../store/cellStore.ts";
 import { STATUS_META } from "../types.ts";
 import { formatDisplay, type ValueFormat } from "@shared/valueFormat.ts";
+import { parseListValue, LIST_CHIPS_SHOWN } from "./listValue.ts";
 import type { ValueType } from "@shared/types.ts";
 import { IconPlay, IconStop, IconExpand, IconAlert, IconStale, IconPencilMark } from "../ui/Icon.tsx";
 import "./Cell.css";
@@ -462,6 +463,24 @@ function Value({ cell, valueType, format }: { cell: CellRecord; valueType?: Valu
     );
   }
   if (cell.value == null || cell.value === "") return null;
+
+  // A list renders as chips — one per item, bounded, the rest counted. Fan-out folds its answers
+  // back as a JSON list, and one long bracketed string in a 32px row is how a feature that works
+  // reads like one that does not. The raw value stays on the title and in every copy.
+  const list = parseListValue(cell.value);
+  if (list) {
+    const shownItems = list.slice(0, LIST_CHIPS_SHOWN);
+    const rest = list.length - shownItems.length;
+    return (
+      <span className="cc-cell__list" title={cell.value}>
+        {shownItems.map((item, i) => (
+          <span key={i} className="cc-cell__chip">{item}</span>
+        ))}
+        {rest > 0 && <span className="cc-cell__chip cc-cell__chip--more">+{rest}</span>}
+      </span>
+    );
+  }
+
   // The one place formatting happens. A currency/percent column shows "$29.00" / "29%"; every other
   // type is returned unchanged by formatDisplay. The title stays the RAW value, so a hover and a
   // copy both give the number rather than the decorated string.

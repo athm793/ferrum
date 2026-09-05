@@ -317,3 +317,32 @@
   overflow: visible;
   z-index: 4;
 }
+
+/* ── list chips ───────────────────────────────────────────────
+   A fan-out's answers fold back as a JSON list, and raw JSON in a 32px row is how a feature that
+   works reads like one that does not. One chip per item, bounded, the rest counted. Presentation
+   only: the raw value stays on the title, in the copy, and in the editor. */
+.cc-cell__list {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.cc-cell__chip {
+  flex: 0 1 auto;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--grid-line);
+  background: var(--grid-header-bg);
+  color: var(--ink-mute);
+}
+.cc-cell__chip--more {
+  flex: 0 0 auto;
+  color: var(--ink-mute-2);
+  font-variant-numeric: tabular-nums;
+}
